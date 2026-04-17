@@ -1,0 +1,24 @@
+.DS_Store
+
+# Node
+bridge/node_modules/
+npm-debug.log*
+
+# Swift / Xcode
+.build/
+native/NotchMonitor/.build/
+DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserdatad/
+*.xcuserstate
+
+# Distribution artifacts
+dist/
+
+# Logs
+*.log
+/tmp/notch-monitor-*.log
+
+# Local editor files
+.idea/
+.vscode/

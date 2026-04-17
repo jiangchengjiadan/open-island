@@ -1,0 +1,36 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+
+      - name: Install bridge dependencies
+        run: npm ci
+        working-directory: bridge
+
+      - name: Check bridge scripts
+        run: |
+          node --check bridge/server.js
+          node --check bridge/hook.js
+          node --check bridge/codex-wrapper.js
+
+      - name: Build Swift app
+        run: swift build
+        working-directory: native/NotchMonitor
