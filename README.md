@@ -2,6 +2,8 @@
 
 Ambient notch-style monitoring for local AI coding sessions on macOS.
 
+[简体中文说明](./README.zh-CN.md)
+
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://www.swift.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-required-339933)](https://nodejs.org/)
