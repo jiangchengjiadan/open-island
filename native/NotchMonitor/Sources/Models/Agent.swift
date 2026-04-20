@@ -138,6 +138,8 @@ struct PermissionRequest: Codable {
     let type: String
     let message: String
     let filePath: String?
+    let command: String?
+    let permissionKey: String?
     let timestamp: Date
 }
 

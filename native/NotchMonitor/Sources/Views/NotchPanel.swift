@@ -26,7 +26,7 @@ struct NotchPanelView: View {
                     }
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: CGFloat(maxVisibleRows * 54 + 16))
+                .frame(maxHeight: scrollMaxHeight)
             }
         }
         .frame(width: 520, height: panelHeight, alignment: .top)
@@ -49,11 +49,25 @@ struct NotchPanelView: View {
             }
             return min(286, CGFloat(112 + (min(issueCount, 4) * 42)))
         }
-        let rowCount = min(max(socketService.agents.count, 1), maxVisibleRows)
-        return CGFloat(24 + (rowCount * 54))
+        return scrollMaxHeight
     }
 
     private var maxVisibleRows: Int { 6 }
+
+    private var scrollMaxHeight: CGFloat {
+        let visibleAgents = Array(socketService.agents.prefix(maxVisibleRows))
+        let rowsHeight = visibleAgents.reduce(CGFloat(0)) { total, agent in
+            total + rowHeight(for: agent)
+        }
+        return 16 + rowsHeight
+    }
+
+    private func rowHeight(for agent: Agent) -> CGFloat {
+        if agent.needsPermission || agent.interactivePrompt != nil {
+            return 98
+        }
+        return 54
+    }
 }
 
 struct EmptyStateView: View {
@@ -259,6 +273,7 @@ struct CompactAgentRow: View {
                 InlineApprovalBar(
                     request: request,
                     onAllow: { respondToPermission(agent.id, allowed: true) },
+                    onAllowSimilar: { respondToPermission(agent.id, allowed: true, scope: "session_similar") },
                     onDeny: { respondToPermission(agent.id, allowed: false) }
                 )
                 .padding(.horizontal, 14)
@@ -294,6 +309,9 @@ struct CompactAgentRow: View {
             if agent.needsPermission {
                 Button("Allow") {
                     respondToPermission(agent.id, allowed: true)
+                }
+                Button("Allow Similar") {
+                    respondToPermission(agent.id, allowed: true, scope: "session_similar")
                 }
                 Button("Deny") {
                     respondToPermission(agent.id, allowed: false)
@@ -392,11 +410,11 @@ struct CompactAgentRow: View {
         TerminalJumpService.jump(to: agent)
     }
 
-    func respondToPermission(_ agentId: String, allowed: Bool) {
+    func respondToPermission(_ agentId: String, allowed: Bool, scope: String = "once") {
         NotificationCenter.default.post(
             name: .init("PermissionResponse"),
             object: nil,
-            userInfo: ["agentId": agentId, "allowed": allowed]
+            userInfo: ["agentId": agentId, "allowed": allowed, "scope": scope]
         )
     }
 
@@ -409,6 +427,7 @@ struct CompactAgentRow: View {
 struct InlineApprovalBar: View {
     let request: PermissionRequest
     let onAllow: () -> Void
+    let onAllowSimilar: () -> Void
     let onDeny: () -> Void
 
     var body: some View {
@@ -424,6 +443,8 @@ struct InlineApprovalBar: View {
 
             InlineActionButton(title: "Deny", tint: Color(hex: "#7c2d2b"), foreground: Color(hex: "#ffe7e4"), action: onDeny)
             InlineActionButton(title: "Allow", tint: Color(hex: "#9ddab4"), foreground: Color(hex: "#08281d"), action: onAllow)
+            InlineActionButton(title: "Allow Similar", tint: Color(hex: "#f5c36b"), foreground: Color(hex: "#2a1805"), action: onAllowSimilar)
+                .help("Approve matching requests in this session")
         }
     }
 }
