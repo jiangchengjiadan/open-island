@@ -15,6 +15,7 @@ class NotchMonitorServer {
     constructor() {
         this.clients = new Set();
         this.agents = new Map();
+        this.sessionPermissionGrants = new Map();
     }
 
     start() {
@@ -132,26 +133,67 @@ class NotchMonitorServer {
     unregisterAgent(id) {
         if (this.agents.has(id)) {
             this.agents.delete(id);
+            this.sessionPermissionGrants.delete(id);
             this.broadcast({ type: 'agent_unregistered', data: { id } });
         }
     }
 
     broadcastPermissionRequest(data) {
+        const request = data.request || {};
+        const permissionKey = request.permissionKey || permissionKeyForRequest(request);
+        if (permissionKey) {
+            request.permissionKey = permissionKey;
+            data.request = request;
+        }
+
+        if (this.hasSessionGrant(data.agentId, permissionKey)) {
+            this.forwardPermissionResponse({
+                agentId: data.agentId,
+                requestId: request.id,
+                allowed: true,
+                scope: 'session_similar',
+                permissionKey,
+                autoApproved: true
+            });
+            return;
+        }
+
         const agent = this.agents.get(data.agentId);
         if (agent) {
             agent.needsPermission = true;
-            agent.permissionRequest = data.request;
+            agent.permissionRequest = request;
             this.broadcast({ type: 'permission_requested', data });
         }
     }
 
     forwardPermissionResponse(data) {
         const agent = this.agents.get(data.agentId);
+        const permissionKey = data.permissionKey || agent?.permissionRequest?.permissionKey || null;
+        const scope = data.scope || 'once';
+
+        if (data.allowed && scope === 'session_similar' && permissionKey) {
+            this.addSessionGrant(data.agentId, permissionKey);
+            data.permissionKey = permissionKey;
+        }
+
         if (agent) {
             agent.needsPermission = false;
             agent.permissionRequest = null;
         }
         this.broadcast({ type: 'permission_responded', data });
+    }
+
+    addSessionGrant(agentId, permissionKey) {
+        if (!agentId || !permissionKey) return;
+        if (!this.sessionPermissionGrants.has(agentId)) {
+            this.sessionPermissionGrants.set(agentId, new Set());
+        }
+        this.sessionPermissionGrants.get(agentId).add(permissionKey);
+    }
+
+    hasSessionGrant(agentId, permissionKey) {
+        if (!agentId || !permissionKey) return false;
+        return this.sessionPermissionGrants.get(agentId)?.has(permissionKey) === true;
     }
 
     sendSnapshot(socket) {
@@ -176,6 +218,26 @@ class NotchMonitorServer {
 
 function generateId() {
     return Math.random().toString(36).substring(2, 15);
+}
+
+function normalizePermissionPart(value) {
+    if (value == null) return '';
+    return String(value).trim().replace(/\s+/g, ' ');
+}
+
+function permissionKeyForRequest(request) {
+    const type = normalizePermissionPart(request?.type);
+    if (!type) return '';
+
+    if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(type)) {
+        return `${type}:file:${normalizePermissionPart(request.filePath || request.message)}`;
+    }
+
+    if (type === 'Bash') {
+        return `${type}:command:${normalizePermissionPart(request.command || request.message)}`;
+    }
+
+    return `${type}:input:${normalizePermissionPart(request.message)}`;
 }
 
 // 启动服务器

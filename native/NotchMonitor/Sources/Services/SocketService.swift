@@ -54,7 +54,8 @@ class SocketService: ObservableObject {
                 return
             }
 
-            self.sendPermissionResponse(agentId: agentId, allowed: allowed)
+            let scope = notification.userInfo?["scope"] as? String ?? "once"
+            self.sendPermissionResponse(agentId: agentId, allowed: allowed, scope: scope)
         }
     }
 
@@ -227,7 +228,7 @@ class SocketService: ObservableObject {
         }
     }
 
-    func sendPermissionResponse(agentId: String, allowed: Bool) {
+    func sendPermissionResponse(agentId: String, allowed: Bool, scope: String = "once") {
         guard let agent = agents.first(where: { $0.id == agentId }) else { return }
 
         let payload = PermissionResponseMessage(
@@ -235,7 +236,9 @@ class SocketService: ObservableObject {
             data: PermissionResponseData(
                 agentId: agentId,
                 requestId: agent.permissionRequest?.id ?? agentId,
-                allowed: allowed
+                allowed: allowed,
+                scope: scope,
+                permissionKey: agent.permissionRequest?.permissionKey
             )
         )
         send(payload)
@@ -926,6 +929,8 @@ private struct PermissionRequestPayload: Decodable {
     let type: String
     let message: String
     let filePath: String?
+    let command: String?
+    let permissionKey: String?
     let timestamp: Double?
 
     func asPermissionRequest() -> PermissionRequest {
@@ -934,6 +939,8 @@ private struct PermissionRequestPayload: Decodable {
             type: type,
             message: message,
             filePath: filePath,
+            command: command,
+            permissionKey: permissionKey,
             timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
         )
     }
@@ -948,6 +955,8 @@ private struct PermissionResponseData: Encodable {
     let agentId: String
     let requestId: String
     let allowed: Bool
+    let scope: String
+    let permissionKey: String?
 }
 
 // MARK: - Color Extension

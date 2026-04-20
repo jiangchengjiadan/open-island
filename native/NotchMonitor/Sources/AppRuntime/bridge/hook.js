@@ -291,11 +291,61 @@ function toolNeedsApproval(toolName) {
 }
 
 function permissionMessage(toolName, payload) {
-  const toolInput = payload.tool_input || payload.toolInput || payload.input || {};
-  const filePath = toolInput.file_path || toolInput.filePath || toolInput.path;
-  const command = toolInput.command || toolInput.cmd;
+  const toolInput = toolInputOf(payload);
+  const filePath = permissionFilePath(payload, false);
+  const command = permissionCommand(payload);
   const target = filePath || command || JSON.stringify(toolInput);
   return `${toolName}${target ? ` ${target}` : ''}`;
+}
+
+function toolInputOf(payload) {
+  return payload.tool_input || payload.toolInput || payload.input || {};
+}
+
+function permissionFilePath(payload, resolvePath = true) {
+  const toolInput = toolInputOf(payload);
+  const filePath = toolInput.file_path || toolInput.filePath || toolInput.path;
+  if (!filePath || !resolvePath) return filePath || null;
+  if (path.isAbsolute(filePath)) return filePath;
+  return path.resolve(payload.cwd || process.cwd(), filePath);
+}
+
+function permissionCommand(payload) {
+  const toolInput = toolInputOf(payload);
+  return toolInput.command || toolInput.cmd || null;
+}
+
+function normalizePermissionPart(value) {
+  if (value == null) return '';
+  return String(value).trim().replace(/\s+/g, ' ');
+}
+
+function stablePermissionInput(value) {
+  if (Array.isArray(value)) {
+    return value.map(stablePermissionInput);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = stablePermissionInput(value[key]);
+      return result;
+    }, {});
+  }
+  return value;
+}
+
+function permissionKey(toolName, payload) {
+  const type = normalizePermissionPart(toolName);
+  if (!type) return '';
+
+  if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(type)) {
+    return `${type}:file:${normalizePermissionPart(permissionFilePath(payload))}`;
+  }
+
+  if (type === 'Bash') {
+    return `${type}:command:${normalizePermissionPart(permissionCommand(payload))}`;
+  }
+
+  return `${type}:input:${normalizePermissionPart(JSON.stringify(stablePermissionInput(toolInputOf(payload))))}`;
 }
 
 function permissionOutput(eventName, allowed) {
@@ -466,16 +516,15 @@ async function runEventHook(source) {
     }
 
     if (eventName === 'PreToolUse' && toolNeedsApproval(matcherOf(payload))) {
+      const toolName = matcherOf(payload);
       const requestId = `${agentId}:${Date.now()}`;
       const request = {
         id: requestId,
-        type: matcherOf(payload),
-        message: permissionMessage(matcherOf(payload), payload),
-        filePath:
-          payload.tool_input?.file_path ||
-          payload.toolInput?.filePath ||
-          payload.input?.path ||
-          null,
+        type: toolName,
+        message: permissionMessage(toolName, payload),
+        filePath: permissionFilePath(payload),
+        command: permissionCommand(payload),
+        permissionKey: permissionKey(toolName, payload),
         timestamp: Date.now(),
       };
 
