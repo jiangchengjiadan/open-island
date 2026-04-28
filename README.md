@@ -14,9 +14,10 @@ Open Island is a macOS menu bar app for people who run multiple local coding age
 
 ## Highlights
 
-- Live session status for Claude Code and Codex
-- Permission prompts surfaced in the panel
+- Live session status for Claude Code, Codex, and Qoder CLI
+- Permission prompts surfaced in the panel for supported hook events
 - One-click jump back to the owning terminal or IDE
+- Session-aware jump behavior for iTerm/tmux and workspace-level jump for VS Code/Cursor
 - Lightweight local macOS app with a small bridge process
 
 ## Showcase
@@ -63,8 +64,19 @@ Primary support today:
 
 - Claude Code
 - Codex
+- Qoder CLI
 
-The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code and Codex.
+Current jump coverage:
+
+- Terminal
+- iTerm
+- Ghostty
+- Warp
+- VS Code
+- Cursor
+- JetBrains IDEs
+
+The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code, Codex, and Qoder on local macOS workflows.
 
 ## Status
 
@@ -75,11 +87,15 @@ What works well today:
 - personal and local developer workflows
 - bridge, panel rendering, and supported permission flows
 - terminal and iTerm jump behavior
+- VS Code and Cursor workspace jump
+- Codex default hook install and session de-duplication
+- Qoder session monitoring
 
 Current rough edges:
 
 - JetBrains embedded terminal routing still has edge cases
 - same-project multi-window JetBrains routing is not consistently precise
+- Ghostty and Warp jump are still best-effort first versions
 - some interactions depend on Accessibility and AppleScript stability
 
 Near-term focus:
@@ -104,6 +120,8 @@ Install the launcher and local hooks:
 ```bash
 ./scripts/install-hooks.sh
 ```
+
+This installs Claude, Qoder, and Codex hooks, the Codex wrapper, and the `open-island` launcher.
 
 Then use:
 
@@ -158,10 +176,21 @@ Without this permission, the panel may still render, but jump and automation beh
 ## Usage
 
 1. Start Open Island with `open-island start`
-2. Launch Claude Code or Codex normally
+2. Launch Claude Code, Codex, or Qoder normally
 3. Watch live sessions appear in the notch panel
 4. Click a session to jump back to its terminal or IDE
 5. Use the panel to review supported permission prompts
+
+## Recent Work
+
+- Codex hooks are installed by default
+- Codex permission hooks were updated for current CLI compatibility
+- Codex auxiliary process/session de-duplication was tightened
+- stale session cleanup and permission-request queueing were added to the bridge
+- bootstrap diagnostics can now attempt limited self-heal
+- iTerm/tmux jump was reworked toward session-first behavior
+- VS Code/Cursor jump now prefers workspace reopen via the editor CLI
+- Qoder hooks and session monitoring were added
 
 ## Project Structure
 

@@ -86,6 +86,7 @@ enum AgentType: String, Codable, CaseIterable {
     case codex
     case cursor
     case gemini
+    case qoder
     case openCode
 
     init(from decoder: Decoder) throws {
@@ -100,6 +101,8 @@ enum AgentType: String, Codable, CaseIterable {
             self = .cursor
         case "gemini":
             self = .gemini
+        case "qoder":
+            self = .qoder
         case "opencode", "open_code":
             self = .openCode
         default:
@@ -118,6 +121,7 @@ enum AgentType: String, Codable, CaseIterable {
         case .codex: return "brain"
         case .cursor: return "cursorarrow"
         case .gemini: return "star.fill"
+        case .qoder: return "bolt.horizontal.fill"
         case .openCode: return "code"
         }
     }
@@ -128,6 +132,7 @@ enum AgentType: String, Codable, CaseIterable {
         case .codex: return "#10b981"
         case .cursor: return "#6366f1"
         case .gemini: return "#8b5cf6"
+        case .qoder: return "#f97316"
         case .openCode: return "#3b82f6"
         }
     }

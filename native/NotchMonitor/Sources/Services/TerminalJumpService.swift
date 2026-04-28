@@ -20,13 +20,19 @@ enum TerminalJumpService {
         let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
         let terminalHint = (agent.terminalApp ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let terminalTitleToken = agent.terminalTitleToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let iTermSessionTokens = iTermSessionTokens(from: agent)
+        let tmuxTarget = agent.environmentHints?["TMUX_TARGET"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tmuxSocketPath = agent.environmentHints?["TMUX_SOCKET_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        log("jump requested agent=\(agent.name) terminalHint=\(terminalHint) titleToken=\(terminalTitleToken ?? "") app=\(descriptor.debugName) bundle=\(descriptor.bundleIdentifier ?? "") tty=\(ttyCandidates.joined(separator: ",")) cwd=\(cwd ?? "") pid=\(agent.pid.map(String.init) ?? "")")
+        log("jump requested agent=\(agent.name) terminalHint=\(terminalHint) titleToken=\(terminalTitleToken ?? "") app=\(descriptor.debugName) bundle=\(descriptor.bundleIdentifier ?? "") tty=\(ttyCandidates.joined(separator: ",")) cwd=\(cwd ?? "") iTermSession=\(iTermSessionTokens.joined(separator: ",")) tmuxTarget=\(tmuxTarget ?? "") pid=\(agent.pid.map(String.init) ?? "")")
+
+        let tmuxPaneSelected = jumpToTmuxPane(tmuxTarget: tmuxTarget, tmuxSocketPath: tmuxSocketPath, ttyCandidates: ttyCandidates)
+        if tmuxPaneSelected {
+            log("tmux pane selected target=\(tmuxTarget ?? "")")
+        }
 
         for attempt in 1...3 {
-            if let bundleIdentifier = descriptor.bundleIdentifier {
-                activateApplication(bundleIdentifier: bundleIdentifier)
-            }
+            activatePreferredApplication(for: descriptor)
 
             if attempt > 1 {
                 usleep(100_000)
@@ -35,7 +41,7 @@ enum TerminalJumpService {
             }
 
             for target in descriptor.preferredTargets {
-                if jump(to: target, ttyCandidates: ttyCandidates, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor) {
+                if jump(to: target, ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor) {
                     log("jump succeeded target=\(target.rawValue) attempt=\(attempt)")
                     return
                 }
@@ -44,11 +50,28 @@ enum TerminalJumpService {
             log("jump retry scheduled attempt=\(attempt) app=\(descriptor.debugName)")
         }
 
+        if tmuxPaneSelected {
+            activateBestEffort(for: descriptor)
+            log("jump completed via tmux pane selection with app activation for app=\(descriptor.debugName)")
+            return
+        }
+
         if ttyCandidates.isEmpty || descriptor.requiresActivationFallback {
             activateBestEffort(for: descriptor)
             log("jump fell back to app activation for app=\(descriptor.debugName)")
         } else {
             log("jump aborted without activation because no exact target matched after retries")
+        }
+    }
+
+    private static func activatePreferredApplication(for descriptor: AppDescriptor) {
+        if let bundleIdentifier = descriptor.bundleIdentifier {
+            activateApplication(bundleIdentifier: bundleIdentifier)
+            return
+        }
+
+        if let appName = descriptor.localizedName {
+            _ = activateApplication(named: appName)
         }
     }
 
@@ -67,10 +90,239 @@ enum TerminalJumpService {
         return Array(values)
     }
 
-    private static func jump(to target: JumpTarget, ttyCandidates: [String], terminalTitleToken: String?, cwd: String?, descriptor: AppDescriptor) -> Bool {
-        let script = target.script(ttyCandidates: ttyCandidates, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor)
+    private static func iTermSessionTokens(from agent: Agent) -> [String] {
+        guard let rawValue = agent.environmentHints?["ITERM_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else {
+            return []
+        }
+
+        var tokens = [rawValue]
+        if let prefix = rawValue.split(separator: ":").first.map(String.init),
+           !prefix.isEmpty,
+           !tokens.contains(prefix) {
+            tokens.append(prefix)
+        }
+        return tokens
+    }
+
+    private static func jump(to target: JumpTarget, ttyCandidates: [String], iTermSessionTokens: [String], terminalTitleToken: String?, cwd: String?, descriptor: AppDescriptor) -> Bool {
+        if target == .editorIDE,
+           jumpToEditorWorkspace(cwd: cwd, descriptor: descriptor) {
+            return true
+        }
+
+        let script = target.script(ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor)
         let result = run(script: script, target: target.rawValue)
         return result == "ok"
+    }
+
+    private static func jumpToTmuxPane(tmuxTarget: String?, tmuxSocketPath: String?, ttyCandidates: [String]) -> Bool {
+        guard let tmuxTarget, !tmuxTarget.isEmpty else { return false }
+        guard let tmuxPath = resolveTmuxPath() else {
+            log("tmux jump skipped because tmux executable could not be resolved")
+            return false
+        }
+
+        let socketArgs: [String]
+        if let tmuxSocketPath, !tmuxSocketPath.isEmpty {
+            socketArgs = ["-S", tmuxSocketPath]
+        } else {
+            socketArgs = []
+        }
+
+        let sessionWindow: String
+        if let dotIndex = tmuxTarget.lastIndex(of: ".") {
+            sessionWindow = String(tmuxTarget[..<dotIndex])
+        } else {
+            sessionWindow = tmuxTarget
+        }
+
+        let sessionName: String
+        if let colonIndex = tmuxTarget.firstIndex(of: ":") {
+            sessionName = String(tmuxTarget[..<colonIndex])
+        } else {
+            sessionName = tmuxTarget
+        }
+
+        let clientTTY = runTmuxCommand(tmuxPath: tmuxPath, socketArgs: socketArgs, args: ["list-clients", "-F", "#{client_tty}"])?
+            .split(separator: "\n")
+            .map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+
+        if let clientTTY, !clientTTY.isEmpty {
+            _ = runTmuxCommand(tmuxPath: tmuxPath, socketArgs: socketArgs, args: ["switch-client", "-c", clientTTY, "-t", sessionName])
+        } else {
+            log("tmux client tty missing for target=\(tmuxTarget); skipping switch-client")
+        }
+
+        _ = runTmuxCommand(tmuxPath: tmuxPath, socketArgs: socketArgs, args: ["select-window", "-t", sessionWindow])
+        let result = runTmuxCommand(tmuxPath: tmuxPath, socketArgs: socketArgs, args: ["select-pane", "-t", tmuxTarget])
+        return result != nil
+    }
+
+    private static func runTmuxCommand(tmuxPath: String, socketArgs: [String], args: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmuxPath)
+        process.arguments = socketArgs + args
+
+        let outPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            log("tmux command failed to launch args=\((socketArgs + args).joined(separator: " ")) error=\(error.localizedDescription)")
+            return nil
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            if let errorText = String(data: errorData, encoding: .utf8), !errorText.isEmpty {
+                log("tmux command failed args=\((socketArgs + args).joined(separator: " ")) output=\(errorText.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            return nil
+        }
+
+        let output = outPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func resolveTmuxPath() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/tmux",
+            "/usr/local/bin/tmux",
+            "/usr/bin/tmux",
+        ]
+
+        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return found
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = ["tmux"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.isEmpty ? nil : path
+    }
+
+    private static func normalizedTTYCandidate(_ tty: String?) -> String? {
+        guard let tty else { return nil }
+        let trimmed = tty.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("/dev/") {
+            return String(trimmed.dropFirst("/dev/".count))
+        }
+        return trimmed
+    }
+
+    private static func jumpToEditorWorkspace(cwd: String?, descriptor: AppDescriptor) -> Bool {
+        guard let cwd, !cwd.isEmpty else { return false }
+        guard FileManager.default.fileExists(atPath: cwd) else { return false }
+        guard let cliPath = editorCLIPath(for: descriptor) else {
+            log("editor workspace jump skipped because cli could not be resolved app=\(descriptor.debugName)")
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliPath)
+        process.arguments = ["-r", cwd]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            log("editor workspace jump failed to launch app=\(descriptor.debugName) cli=\(cliPath) error=\(error.localizedDescription)")
+            return false
+        }
+
+        process.waitUntilExit()
+        if process.terminationStatus == 0 {
+            log("editor workspace jump succeeded app=\(descriptor.debugName) cli=\(cliPath) cwd=\(cwd)")
+            return true
+        }
+
+        let errorData = (process.standardError as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+        let errorText = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        log("editor workspace jump failed app=\(descriptor.debugName) cli=\(cliPath) cwd=\(cwd) status=\(process.terminationStatus) error=\(errorText)")
+        return false
+    }
+
+    private static func editorCLIPath(for descriptor: AppDescriptor) -> String? {
+        let executableName: String
+        switch descriptor.kind {
+        case .vscode:
+            executableName = "code"
+        case .cursor:
+            executableName = "cursor"
+        default:
+            return nil
+        }
+
+        if let bundleIdentifier = descriptor.bundleIdentifier,
+           let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first,
+           let bundleURL = runningApp.bundleURL {
+            let bundleCLI = bundleURL
+                .appendingPathComponent("Contents/Resources/app/bin")
+                .appendingPathComponent(executableName)
+                .path
+            if FileManager.default.isExecutableFile(atPath: bundleCLI) {
+                return bundleCLI
+            }
+        }
+
+        let candidates = [
+            "/opt/homebrew/bin/\(executableName)",
+            "/usr/local/bin/\(executableName)",
+            "/usr/bin/\(executableName)",
+            "\(NSHomeDirectory())/.local/bin/\(executableName)",
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+            "\(NSHomeDirectory())/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            "\(NSHomeDirectory())/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+            "\(NSHomeDirectory())/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+        ]
+
+        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return found
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [executableName]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.isEmpty ? nil : path
     }
 
     private static func run(script: String, target: String) -> String? {
@@ -99,6 +351,18 @@ enum TerminalJumpService {
         log("activated bundle=\(bundleIdentifier) success=\(activated)")
     }
 
+    private static func activateApplication(named appName: String) -> Bool {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            ($0.localizedName ?? "").caseInsensitiveCompare(appName) == .orderedSame
+        }) else {
+            return false
+        }
+
+        let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        log("activated appName=\(appName) success=\(activated)")
+        return activated
+    }
+
     private static func activateBestEffort(for descriptor: AppDescriptor) {
         if let bundleIdentifier = descriptor.bundleIdentifier {
             activateApplication(bundleIdentifier: bundleIdentifier)
@@ -106,7 +370,13 @@ enum TerminalJumpService {
         }
 
         guard let appName = descriptor.localizedName else { return }
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: descriptor.fallbackBundleIdentifier ?? bundleIdentifier(for: appName)) else {
+        if activateApplication(named: appName) {
+            return
+        }
+
+        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: descriptor.fallbackBundleIdentifier ?? bundleIdentifier(for: appName))
+
+        guard let url else {
             return
         }
 
@@ -122,6 +392,12 @@ enum TerminalJumpService {
         switch appName {
         case "iTerm":
             return "com.googlecode.iterm2"
+        case "Ghostty":
+            return "com.mitchellh.ghostty"
+        case "Warp":
+            return "dev.warp.Warp-Stable"
+        case "Visual Studio Code":
+            return "com.microsoft.VSCode"
         case "Terminal":
             return "com.apple.Terminal"
         default:
@@ -223,6 +499,12 @@ enum TerminalJumpService {
                 return [.terminalApp]
             case .iTerm:
                 return [.iTerm]
+            case .ghostty:
+                return [.ghostty]
+            case .warp:
+                return [.warp]
+            case .vscode, .cursor:
+                return [.editorIDE]
             case .jetBrains:
                 return [.jetBrains]
             case .unknown:
@@ -232,7 +514,7 @@ enum TerminalJumpService {
 
         var requiresActivationFallback: Bool {
             switch kind {
-            case .jetBrains:
+            case .jetBrains, .vscode, .cursor:
                 return true
             default:
                 return false
@@ -240,16 +522,17 @@ enum TerminalJumpService {
         }
 
         static func resolve(for agent: Agent) -> AppDescriptor {
-            let explicit = fromTerminalHint(agent.terminalApp)
+            let inferredHint = preferredTerminalHint(for: agent)
+            let explicit = fromTerminalHint(inferredHint)
 
             if shouldPreferProcessTree(for: explicit), let pid = agent.pid, let app = applicationForProcessTree(pid: pid) {
                 let resolved = fromRunningApplication(app)
-                log("resolved via process tree for ambiguous terminal hint hint=\(agent.terminalApp ?? "") app=\(resolved.debugName) bundle=\(resolved.bundleIdentifier ?? "") pid=\(pid)")
+                log("resolved via process tree for ambiguous terminal hint hint=\(inferredHint ?? "") app=\(resolved.debugName) bundle=\(resolved.bundleIdentifier ?? "") pid=\(pid)")
                 return resolved
             }
 
             if let explicit {
-                log("resolved via terminal hint hint=\(agent.terminalApp ?? "") app=\(explicit.debugName) bundle=\(explicit.bundleIdentifier ?? "")")
+                log("resolved via terminal hint hint=\(inferredHint ?? "") app=\(explicit.debugName) bundle=\(explicit.bundleIdentifier ?? "")")
                 return explicit
             }
 
@@ -259,14 +542,67 @@ enum TerminalJumpService {
                 return resolved
             }
 
-            if shouldTryJetBrainsFallback(for: agent.terminalApp),
+            if shouldTryJetBrainsFallback(for: inferredHint),
                let fallback = singleRunningJetBrainsApplication(cwd: agent.cwd) {
-                log("resolved via JetBrains fallback hint=\(agent.terminalApp ?? "") app=\(fallback.debugName) bundle=\(fallback.bundleIdentifier ?? "") cwd=\(agent.cwd ?? "")")
+                log("resolved via JetBrains fallback hint=\(inferredHint ?? "") app=\(fallback.debugName) bundle=\(fallback.bundleIdentifier ?? "") cwd=\(agent.cwd ?? "")")
                 return fallback
             }
 
-            log("resolved as unknown hint=\(agent.terminalApp ?? "") pid=\(agent.pid.map(String.init) ?? "")")
-            return AppDescriptor(kind: .unknown, localizedName: agent.terminalApp, bundleIdentifier: nil)
+            log("resolved as unknown hint=\(inferredHint ?? "") pid=\(agent.pid.map(String.init) ?? "")")
+            return AppDescriptor(kind: .unknown, localizedName: inferredHint, bundleIdentifier: nil)
+        }
+
+        private static func preferredTerminalHint(for agent: Agent) -> String? {
+            let explicit = normalizedHint(agent.terminalApp)
+            if let explicit, !genericTerminalHints.contains(explicit.lowercased()) {
+                return explicit
+            }
+
+            if let envHints = agent.environmentHints {
+                if let app = normalizedHint(envHints["TERM_PROGRAM_APP"]) {
+                    return app
+                }
+
+                if let program = normalizedHint(envHints["TERM_PROGRAM"]) {
+                    if program.lowercased() == "vscode", envHints["VSCODE_GIT_IPC_HANDLE"] != nil {
+                        return inferredEditorHost(from: agent.processChain) ?? "Visual Studio Code"
+                    }
+                    return program
+                }
+
+                if envHints["ITERM_SESSION_ID"] != nil {
+                    return "iTerm"
+                }
+            }
+
+            if let inferred = inferredEditorHost(from: agent.processChain) {
+                return inferred
+            }
+
+            return explicit
+        }
+
+        private static func inferredEditorHost(from processChain: [String]?) -> String? {
+            let joined = (processChain ?? []).joined(separator: " ").lowercased()
+            if joined.contains("cursor") {
+                return "Cursor"
+            }
+            if joined.contains("visual studio code") || joined.contains("vscode") || joined.contains(":code ") || joined.hasSuffix(":code") {
+                return "Visual Studio Code"
+            }
+            if joined.contains("iterm") {
+                return "iTerm"
+            }
+            if joined.contains("terminal") {
+                return "Terminal"
+            }
+            return nil
+        }
+
+        private static func normalizedHint(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
         }
 
         private static func shouldPreferProcessTree(for descriptor: AppDescriptor?) -> Bool {
@@ -325,6 +661,18 @@ enum TerminalJumpService {
             if lowercased.contains("iterm") {
                 return AppDescriptor(kind: .iTerm, localizedName: "iTerm", bundleIdentifier: "com.googlecode.iterm2")
             }
+            if lowercased.contains("ghostty") {
+                return AppDescriptor(kind: .ghostty, localizedName: "Ghostty", bundleIdentifier: "com.mitchellh.ghostty")
+            }
+            if lowercased.contains("warp") {
+                return AppDescriptor(kind: .warp, localizedName: "Warp", bundleIdentifier: "dev.warp.Warp-Stable")
+            }
+            if lowercased.contains("visual studio code") || lowercased == "code" || lowercased.contains("vscode") {
+                return AppDescriptor(kind: .vscode, localizedName: "Visual Studio Code", bundleIdentifier: "com.microsoft.VSCode")
+            }
+            if lowercased.contains("cursor") {
+                return AppDescriptor(kind: .cursor, localizedName: "Cursor", bundleIdentifier: nil)
+            }
             if lowercased.contains("terminal") {
                 return AppDescriptor(kind: .terminal, localizedName: "Terminal", bundleIdentifier: "com.apple.Terminal")
             }
@@ -342,6 +690,18 @@ enum TerminalJumpService {
 
             if lowercased.contains("iterm") {
                 return AppDescriptor(kind: .iTerm, localizedName: localizedName ?? "iTerm", bundleIdentifier: bundleIdentifier ?? "com.googlecode.iterm2")
+            }
+            if lowercased.contains("ghostty") || bundleIdentifier == "com.mitchellh.ghostty" {
+                return AppDescriptor(kind: .ghostty, localizedName: localizedName ?? "Ghostty", bundleIdentifier: bundleIdentifier ?? "com.mitchellh.ghostty")
+            }
+            if lowercased.contains("warp") || bundleIdentifier == "dev.warp.Warp-Stable" {
+                return AppDescriptor(kind: .warp, localizedName: localizedName ?? "Warp", bundleIdentifier: bundleIdentifier ?? "dev.warp.Warp-Stable")
+            }
+            if lowercased.contains("visual studio code") || bundleIdentifier == "com.microsoft.VSCode" || bundleIdentifier == "com.microsoft.vscode" || lowercased.contains("vscode") {
+                return AppDescriptor(kind: .vscode, localizedName: localizedName ?? "Visual Studio Code", bundleIdentifier: bundleIdentifier ?? "com.microsoft.VSCode")
+            }
+            if lowercased.contains("cursor") {
+                return AppDescriptor(kind: .cursor, localizedName: localizedName ?? "Cursor", bundleIdentifier: bundleIdentifier)
             }
             if lowercased.contains("terminal") {
                 return AppDescriptor(kind: .terminal, localizedName: localizedName ?? "Terminal", bundleIdentifier: bundleIdentifier ?? "com.apple.Terminal")
@@ -369,6 +729,10 @@ enum TerminalJumpService {
     fileprivate enum AppKind: String {
         case terminal
         case iTerm
+        case ghostty
+        case warp
+        case vscode
+        case cursor
         case jetBrains
         case unknown
     }
@@ -377,14 +741,23 @@ enum TerminalJumpService {
 private enum JumpTarget: String {
     case terminalApp = "Terminal"
     case iTerm = "iTerm"
+    case ghostty = "Ghostty"
+    case warp = "Warp"
+    case editorIDE = "EditorIDE"
     case jetBrains = "JetBrains"
 
-    func script(ttyCandidates: [String], terminalTitleToken: String?, cwd: String?, descriptor: TerminalJumpService.AppDescriptor) -> String {
+    func script(ttyCandidates: [String], iTermSessionTokens: [String], terminalTitleToken: String?, cwd: String?, descriptor: TerminalJumpService.AppDescriptor) -> String {
         switch self {
         case .terminalApp:
             return terminalScript(ttyCandidates: ttyCandidates, cwd: cwd)
         case .iTerm:
-            return iTermScript(ttyCandidates: ttyCandidates, cwd: cwd)
+            return iTermScript(ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd)
+        case .ghostty:
+            return ghosttyScript(cwd: cwd)
+        case .warp:
+            return warpScript(cwd: cwd)
+        case .editorIDE:
+            return editorIDEScript(cwd: cwd, descriptor: descriptor)
         case .jetBrains:
             return jetBrainsScript(terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor)
         }
@@ -399,7 +772,7 @@ private enum JumpTarget: String {
         tell application "Terminal"
             activate
             repeat with targetTTY in \(ttyList)
-                set targetTTYValue to contents of targetTTY
+                set targetTTYValue to targetTTY
                 repeat with theWindow in windows
                     set windowRef to contents of theWindow
                     repeat with tabIndex from 1 to count of tabs of windowRef
@@ -463,33 +836,50 @@ private enum JumpTarget: String {
         """
     }
 
-    private func iTermScript(ttyCandidates: [String], cwd: String?) -> String {
+    private func iTermScript(ttyCandidates: [String], iTermSessionTokens: [String], terminalTitleToken: String?, cwd: String?) -> String {
         let ttyList = appleScriptList(ttyCandidates)
+        let sessionIDList = appleScriptList(iTermSessionTokens)
+        let titleToken = appleScriptString(terminalTitleToken ?? "")
         let escapedCwd = appleScriptString(cwd ?? "")
         return """
         tell application "iTerm"
+            if not (it is running) then return "miss"
             activate
+            repeat with targetSessionID in \(sessionIDList)
+                set targetSessionValue to targetSessionID
+                if targetSessionValue is not "" then
+                    repeat with aWindow in windows
+                        repeat with aTab in tabs of aWindow
+                            repeat with aSession in sessions of aTab
+                                try
+                                    if (id of aSession as text) is targetSessionValue then
+                                        select aWindow
+                                        tell aWindow to select aTab
+                                        select aSession
+                                        return "ok"
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end repeat
+                end if
+            end repeat
+
             repeat with targetTTY in \(ttyList)
-                set targetTTYValue to contents of targetTTY
-                repeat with theWindow in windows
-                    set windowRef to contents of theWindow
-                    repeat with theTab in tabs of windowRef
-                        set tabRef to contents of theTab
-                        repeat with theSession in sessions of tabRef
-                            set sessionRef to contents of theSession
+                set targetTTYValue to targetTTY
+                repeat with aWindow in windows
+                    repeat with aTab in tabs of aWindow
+                        repeat with aSession in sessions of aTab
                             try
-                                set sessionTTY to tty of sessionRef
+                                set sessionTTY to tty of aSession
                                 set normalizedTTY to sessionTTY
                                 if normalizedTTY starts with "/dev/" then
                                     set normalizedTTY to text 6 thru -1 of normalizedTTY
                                 end if
                                 if sessionTTY is targetTTYValue or normalizedTTY is targetTTYValue then
-                                    tell windowRef
-                                        set current tab to tabRef
-                                    end tell
-                                    tell tabRef
-                                        select
-                                    end tell
+                                    select aWindow
+                                    tell aWindow to select aTab
+                                    select aSession
                                     return "ok"
                                 end if
                             end try
@@ -498,22 +888,33 @@ private enum JumpTarget: String {
                 end repeat
             end repeat
 
-            if \(escapedCwd) is not "" then
-                repeat with theWindow in windows
-                    set windowRef to contents of theWindow
-                    repeat with theTab in tabs of windowRef
-                        set tabRef to contents of theTab
-                        repeat with theSession in sessions of tabRef
-                            set sessionRef to contents of theSession
+            if \(titleToken) is not "" then
+                repeat with aWindow in windows
+                    repeat with aTab in tabs of aWindow
+                        repeat with aSession in sessions of aTab
                             try
-                                set sessionName to name of sessionRef
+                                if (name of aSession as text) contains \(titleToken) then
+                                    select aWindow
+                                    tell aWindow to select aTab
+                                    select aSession
+                                    return "ok"
+                                end if
+                            end try
+                        end repeat
+                    end repeat
+                end repeat
+            end if
+
+            if \(escapedCwd) is not "" then
+                repeat with aWindow in windows
+                    repeat with aTab in tabs of aWindow
+                        repeat with aSession in sessions of aTab
+                            try
+                                set sessionName to name of aSession
                                 if sessionName contains \(escapedCwd) then
-                                    tell windowRef
-                                        set current tab to tabRef
-                                    end tell
-                                    tell tabRef
-                                        select
-                                    end tell
+                                    select aWindow
+                                    tell aWindow to select aTab
+                                    select aSession
                                     return "ok"
                                 end if
                             end try
@@ -524,6 +925,155 @@ private enum JumpTarget: String {
         end tell
         return "miss"
         """
+    }
+
+    private func ghosttyScript(cwd: String?) -> String {
+        let workingDirectories = ghosttyWorkingDirectoryTokens(from: cwd)
+        let nameTokens = projectWindowTokens(from: cwd)
+        let directoryList = appleScriptList(workingDirectories)
+        let nameTokenList = appleScriptList(nameTokens)
+        return """
+        tell application "Ghostty"
+            activate
+            repeat with targetDirectory in \(directoryList)
+                set directoryValue to contents of targetDirectory
+                if directoryValue is not "" then
+                    try
+                        set matches to every terminal whose working directory contains directoryValue
+                        if (count of matches) > 0 then
+                            focus item 1 of matches
+                            return "ok"
+                        end if
+                    end try
+                end if
+            end repeat
+
+            repeat with targetToken in \(nameTokenList)
+                set tokenValue to contents of targetToken
+                if tokenValue is not "" then
+                    try
+                        set matches to every terminal whose name contains tokenValue
+                        if (count of matches) > 0 then
+                            focus item 1 of matches
+                            return "ok"
+                        end if
+                    end try
+                end if
+            end repeat
+        end tell
+        return "miss"
+        """
+    }
+
+    private func warpScript(cwd: String?) -> String {
+        let projectTokens = appleScriptList(projectWindowTokens(from: cwd))
+        let processName = appleScriptString("Warp")
+        return """
+        set matchedWindowName to ""
+        tell application "Warp"
+            activate
+        end tell
+        delay 0.08
+        tell application "System Events"
+            if exists process \(processName) then
+                tell process \(processName)
+                    set frontmost to true
+                    repeat with targetToken in \(projectTokens)
+                        if matchedWindowName is "" then
+                            set tokenValue to contents of targetToken
+                            if tokenValue is not "" then
+                                repeat with uiWindow in windows
+                                    try
+                                        set windowName to name of uiWindow
+                                        if windowName contains tokenValue then
+                                            perform action "AXRaise" of uiWindow
+                                            set matchedWindowName to windowName
+                                            exit repeat
+                                        end if
+                                    end try
+                                end repeat
+                            end if
+                        end if
+                    end repeat
+                end tell
+            end if
+        end tell
+        if matchedWindowName is not "" then
+            return "ok"
+        end if
+        return "miss"
+        """
+    }
+
+    private func editorIDEScript(cwd: String?, descriptor: TerminalJumpService.AppDescriptor) -> String {
+        let processNames = appleScriptList(editorProcessNames(for: descriptor))
+        let projectTokens = appleScriptList(projectWindowTokens(from: cwd))
+        return """
+        set matchedWindowName to ""
+        set didActivate to false
+        tell application "System Events"
+            repeat with targetProcess in \(processNames)
+                if matchedWindowName is "" then
+                    set processValue to contents of targetProcess
+                    if exists process processValue then
+                        tell process processValue
+                            set frontmost to true
+                            set didActivate to true
+                            repeat with targetToken in \(projectTokens)
+                                if matchedWindowName is "" then
+                                    set tokenValue to contents of targetToken
+                                    if tokenValue is not "" then
+                                        repeat with uiWindow in windows
+                                            try
+                                                set windowName to name of uiWindow
+                                                if windowName contains tokenValue then
+                                                    perform action "AXRaise" of uiWindow
+                                                    set matchedWindowName to windowName
+                                                    exit repeat
+                                                end if
+                                            end try
+                                        end repeat
+                                    end if
+                                end if
+                            end repeat
+                            if matchedWindowName is "" then
+                                try
+                                    if (count of windows) > 0 then
+                                        perform action "AXRaise" of window 1
+                                        try
+                                            set matchedWindowName to name of window 1
+                                        on error
+                                            set matchedWindowName to "__frontmost__"
+                                        end try
+                                    else
+                                        set matchedWindowName to "__frontmost__"
+                                    end if
+                                end try
+                            end if
+                        end tell
+                    end if
+                end if
+            end repeat
+        end tell
+        if matchedWindowName is not "" or didActivate then
+            return "ok"
+        end if
+        return "miss"
+        """
+    }
+
+    private func editorProcessNames(for descriptor: TerminalJumpService.AppDescriptor) -> [String] {
+        switch descriptor.kind {
+        case .vscode:
+            return ["Code", "Visual Studio Code"]
+        case .cursor:
+            return ["Cursor"]
+        default:
+            if let localizedName = descriptor.localizedName, !localizedName.isEmpty {
+                return [localizedName]
+            }
+            return ["Cursor"]
+        }
     }
 
     private func jetBrainsScript(terminalTitleToken: String?, cwd: String?, descriptor: TerminalJumpService.AppDescriptor) -> String {
@@ -604,6 +1154,21 @@ private enum JumpTarget: String {
         let fullPath = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         if !fullPath.isEmpty, !tokens.contains(fullPath) {
             tokens.append(fullPath)
+        }
+
+        return tokens
+    }
+
+    private func ghosttyWorkingDirectoryTokens(from cwd: String?) -> [String] {
+        guard let cwd else { return [] }
+
+        let normalized = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+
+        var tokens = [normalized]
+        let parent = URL(fileURLWithPath: normalized).deletingLastPathComponent().path
+        if !parent.isEmpty, parent != normalized {
+            tokens.append(parent)
         }
 
         return tokens
