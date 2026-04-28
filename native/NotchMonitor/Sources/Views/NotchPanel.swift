@@ -327,7 +327,13 @@ struct CompactAgentRow: View {
         if let prompt = agent.interactivePrompt {
             return prompt.title
         }
-        return agent.name.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces)
+        let trimmedName = agent.name.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces)
+        if (trimmedName == "claude-session" || trimmedName == "codex" || trimmedName == "cursor-session"),
+           let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cwd.isEmpty {
+            return URL(fileURLWithPath: cwd).lastPathComponent
+        }
+        return trimmedName
     }
 
     private var secondaryLine: String {
@@ -379,13 +385,45 @@ struct CompactAgentRow: View {
     }
 
     private var terminalLabel: String {
-        let raw = (agent.terminalApp ?? agent.terminal).lowercased()
+        let raw = inferredTerminalLabelSource().lowercased()
         if raw.contains("iterm") { return "iTerm" }
         if raw.contains("terminal") { return "Terminal" }
         if raw.contains("ghostty") { return "Ghostty" }
+        if raw.contains("warp") { return "Warp" }
+        if raw.contains("cursor") { return "Cursor" }
+        if raw.contains("vscode") || raw.contains("visual studio code") || raw == "code" { return "VS Code" }
         if raw.contains("pycharm") { return "PyCharm" }
         if raw.contains("idea") { return "IDEA" }
         return "Shell"
+    }
+
+    private func inferredTerminalLabelSource() -> String {
+        let candidates = [
+            agent.terminalApp,
+            agent.environmentHints?["TERM_PROGRAM_APP"],
+            agent.environmentHints?["TERM_PROGRAM"],
+            inferredTerminalAppFromProcessChain()
+        ]
+
+        for candidate in candidates {
+            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return agent.terminal
+    }
+
+    private func inferredTerminalAppFromProcessChain() -> String? {
+        let joined = (agent.processChain ?? []).joined(separator: " ").lowercased()
+        if joined.contains("cursor") { return "Cursor" }
+        if joined.contains("visual studio code") || joined.contains("vscode") || joined.contains(":code ") || joined.hasSuffix(":code") {
+            return "Visual Studio Code"
+        }
+        if joined.contains("iterm") { return "iTerm" }
+        if joined.contains("terminal") { return "Terminal" }
+        return nil
     }
 
     private var durationLabel: String {

@@ -22,6 +22,11 @@ function slug(text, fallback = 'session') {
 }
 
 function terminalOf() {
+  const inferredApp = inferredTerminalApp(processChainOf(process.pid));
+  if (inferredApp) {
+    return inferredApp;
+  }
+
   return (
     process.env.TERM_PROGRAM_APP ||
     process.env.TERM_PROGRAM ||
@@ -29,6 +34,64 @@ function terminalOf() {
     process.env.TTY ||
     os.hostname()
   );
+}
+
+function tmuxSocketPathFromEnv(env) {
+  const raw = (env.TMUX || '').trim();
+  if (!raw) return '';
+  const separatorIndex = raw.indexOf(',');
+  if (separatorIndex === -1) return raw;
+  return raw.slice(0, separatorIndex);
+}
+
+function tmuxTargetOf(env) {
+  const pane = (env.TMUX_PANE || '').trim();
+  if (!pane) return '';
+
+  try {
+    const socketPath = tmuxSocketPathFromEnv(env);
+    const args = socketPath
+      ? ['-S', socketPath, 'display-message', '-p', '-t', pane, '#S:#I.#P']
+      : ['display-message', '-p', '-t', pane, '#S:#I.#P'];
+    const output = execFileSync('/usr/bin/env', ['tmux', ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env,
+    }).trim();
+    return output;
+  } catch (_) {
+    return '';
+  }
+}
+
+function inferredTerminalApp(processChain) {
+  const termProgramApp = (process.env.TERM_PROGRAM_APP || '').trim();
+  if (termProgramApp) return termProgramApp;
+
+  const termProgram = (process.env.TERM_PROGRAM || '').trim();
+  const joined = (processChain || []).join(' ').toLowerCase();
+
+  if (process.env.VSCODE_GIT_IPC_HANDLE) {
+    if (joined.includes('cursor')) return 'Cursor';
+    return 'Visual Studio Code';
+  }
+
+  if (process.env.ITERM_SESSION_ID) {
+    return 'iTerm';
+  }
+
+  if (termProgram && termProgram.toLowerCase() !== 'tmux') {
+    return termProgram;
+  }
+
+  if (joined.includes('cursor')) return 'Cursor';
+  if (joined.includes('visual studio code') || joined.includes('vscode') || joined.includes(':code ') || joined.endsWith(':code')) return 'Visual Studio Code';
+  if (joined.includes('iterm')) return 'iTerm';
+  if (joined.includes('warp')) return 'Warp';
+  if (joined.includes('ghostty')) return 'Ghostty';
+  if (joined.includes('terminal')) return 'Terminal';
+
+  return '';
 }
 
 function ttyOf() {
@@ -92,13 +155,27 @@ function collectEnvHints() {
     'ITERM_SESSION_ID',
     'ITERM_PROFILE',
     'VSCODE_GIT_IPC_HANDLE',
+    'TMUX',
+    'TMUX_PANE',
   ];
 
-  return Object.fromEntries(
+  const hints = Object.fromEntries(
     keys
       .map((key) => [key, process.env[key]])
       .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
   );
+
+  const tmuxTarget = tmuxTargetOf(process.env);
+  if (tmuxTarget) {
+    hints.TMUX_TARGET = tmuxTarget;
+  }
+
+  const tmuxSocketPath = tmuxSocketPathFromEnv(process.env);
+  if (tmuxSocketPath) {
+    hints.TMUX_SOCKET_PATH = tmuxSocketPath;
+  }
+
+  return hints;
 }
 
 function collectJetBrainsContext() {

@@ -7,11 +7,12 @@ const repoRoot = path.resolve(__dirname, '..');
 const nodePath = process.execPath;
 const hookScript = path.join(repoRoot, 'bridge', 'hook.js');
 const claudeSettingsPath = path.join(process.env.HOME, '.claude', 'settings.json');
+const qoderSettingsPath = path.join(process.env.HOME, '.qoder', 'settings.json');
 const codexConfigPath = path.join(process.env.HOME, '.codex', 'config.toml');
 const codexHooksPath = path.join(process.env.HOME, '.codex', 'hooks.json');
-const installCodexBridgeHooks = process.env.NOTCH_MONITOR_ENABLE_CODEX_HOOKS === '1';
 
 const claudeCommand = `${nodePath} ${hookScript} event claude`;
+const qoderCommand = `${nodePath} ${hookScript} event qoder`;
 const codexCommand = `${nodePath} ${hookScript} event codex`;
 
 const matcherEvents = ['PreToolUse', 'PostToolUse', 'Notification'];
@@ -69,7 +70,15 @@ function managedCommandEntry(command, matcher) {
 }
 
 function installClaudeHooks() {
-  const settings = readJson(claudeSettingsPath, {});
+  installClaudeFamilyHooks(claudeSettingsPath, claudeCommand);
+}
+
+function installQoderHooks() {
+  installClaudeFamilyHooks(qoderSettingsPath, qoderCommand);
+}
+
+function installClaudeFamilyHooks(settingsPath, command) {
+  const settings = readJson(settingsPath, {});
   settings.hooks = settings.hooks || {};
 
   if (Object.prototype.hasOwnProperty.call(settings.hooks, 'beforeStart')) {
@@ -77,21 +86,21 @@ function installClaudeHooks() {
   }
 
   for (const [eventName, entries] of Object.entries(settings.hooks)) {
-    settings.hooks[eventName] = filterManagedEntries(entries, claudeCommand);
+    settings.hooks[eventName] = filterManagedEntries(entries, command);
   }
 
   for (const eventName of matcherEvents) {
     settings.hooks[eventName] = settings.hooks[eventName] || [];
-    settings.hooks[eventName].unshift(managedCommandEntry(claudeCommand, '*'));
+    settings.hooks[eventName].unshift(managedCommandEntry(command, '*'));
   }
 
   for (const eventName of passiveEvents) {
     settings.hooks[eventName] = settings.hooks[eventName] || [];
-    settings.hooks[eventName].unshift(managedCommandEntry(claudeCommand));
+    settings.hooks[eventName].unshift(managedCommandEntry(command));
   }
 
-  backupFile(claudeSettingsPath);
-  writeJson(claudeSettingsPath, settings);
+  backupFile(settingsPath);
+  writeJson(settingsPath, settings);
 }
 
 function ensureCodexHooksFeature() {
@@ -127,12 +136,10 @@ function installCodexHooks() {
     }
   }
 
-  if (installCodexBridgeHooks) {
-    for (const eventName of codexEvents) {
-      config.hooks[eventName] = config.hooks[eventName] || [];
-      const needsMatcher = matcherEvents.includes(eventName);
-      config.hooks[eventName].unshift(managedCommandEntry(codexCommand, needsMatcher ? '*' : undefined));
-    }
+  for (const eventName of codexEvents) {
+    config.hooks[eventName] = config.hooks[eventName] || [];
+    const needsMatcher = matcherEvents.includes(eventName);
+    config.hooks[eventName].unshift(managedCommandEntry(codexCommand, needsMatcher ? '*' : undefined));
   }
 
   backupFile(codexHooksPath);
@@ -143,13 +150,12 @@ function main() {
   installClaudeHooks();
   console.log('Installed NotchMonitor hooks for Claude');
 
+  installQoderHooks();
+  console.log('Installed NotchMonitor hooks for Qoder');
+
   ensureCodexHooksFeature();
   installCodexHooks();
-  console.log(
-    installCodexBridgeHooks
-      ? 'Installed NotchMonitor hooks for Codex'
-      : 'Disabled NotchMonitor Codex hooks to keep Codex terminal output clean'
-  );
+  console.log('Installed NotchMonitor hooks for Codex');
 }
 
 main();
