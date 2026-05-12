@@ -1,105 +1,134 @@
 # Open Island
 
-Ambient notch-style monitoring for local AI coding sessions on macOS.
+<p align="center">
+  <img src="assets/icon/open-island-icon.svg" alt="Open Island" width="128" height="128">
+</p>
 
-[简体中文说明](./README.zh-CN.md)
+<h1 align="center">Open Island</h1>
 
-[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)](https://www.apple.com/macos/)
-[![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://www.swift.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-required-339933)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-early%20preview-informational)](#status)
+<p align="center">
+  <strong>Bring local AI agents out of terminal black boxes and onto your desktop.</strong>
+  <br>
+  A local-first, native macOS control island for Claude Code, Codex, and terminal-native agent workflows.
+  <br><br>
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-Open Island is a macOS menu bar app for people who run multiple local coding agents and want an ambient view of what is active, waiting, or asking for attention. It listens to local agent activity through a Unix socket bridge, renders session state near the notch, surfaces supported permission requests, and lets you jump back to the owning terminal or IDE.
+<p align="center">
+  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/platform-macOS%2013%2B-black?style=flat-square" alt="macOS 13+"></a>
+  <a href="https://www.swift.org/"><img src="https://img.shields.io/badge/Swift-5.9-orange?style=flat-square" alt="Swift 5.9"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-required-339933?style=flat-square" alt="Node.js required"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/status-early%20preview-informational?style=flat-square" alt="Early preview"></a>
+</p>
 
-## Highlights
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#showcase">Showcase</a> ·
+  <a href="#how-it-works">How It Works</a> ·
+  <a href="#development">Development</a>
+</p>
 
-- Live session status for Claude Code and Codex
-- Permission prompts surfaced in the panel
-- One-click jump back to the owning terminal or IDE
-- Lightweight local macOS app with a small bridge process
+<p align="center">
+  <img src="assets/media/open-island-main-interface.png" alt="Open Island main interface" width="760">
+</p>
+
+---
+
+## What is Open Island?
+
+Open Island is a lightweight macOS app that gives local AI coding agents a desktop-level control surface. It sits near the notch or top bar, watches local agent activity through a Unix socket bridge, and shows the state that normally gets buried inside terminals: running sessions, waiting prompts, permission approvals, and the exact place you need to jump back to.
+
+It does not replace Claude Code, Codex, or your terminal. It adds the missing ambient layer around them: visible, controllable, and local.
+
+## Why This Exists
+
+Developers are moving from "asking a chatbot" to delegating real work to local CLI agents. A typical day can include one terminal running a frontend task, another running tests, and an IDE terminal waiting for a permission decision.
+
+That workflow creates three recurring problems:
+
+- **State disappears**: active, waiting, completed, and failed sessions are scattered across terminal tabs and IDE panels.
+- **Permission prompts block silently**: an agent can sit idle for minutes because the approval prompt is hidden behind another window.
+- **Context gets lost**: when something needs intervention, you still have to hunt through terminal windows to find the right session.
+
+Open Island pulls those signals out of the terminal layer and makes them visible without taking over your workspace.
+
+## Core Capabilities
+
+- **Ambient visibility**: collect local Claude Code and Codex sessions into one notch-style panel, with clear running, waiting, completed, and error states.
+- **Desktop-level approval**: surface supported permission requests directly in the panel, so you can approve or deny without breaking out of the current IDE context.
+- **Instant context jump**: click a session card to return to the owning Terminal, iTerm, or supported IDE route instead of manually searching for the right window.
+- **Local-first bridge**: use a small Node.js Unix socket bridge and native macOS UI; no cloud relay, account, or remote telemetry is required.
+- **Workflow-preserving design**: keep using your existing `claude`, `codex`, terminal, and IDE habits. Open Island observes and coordinates; it does not force a new command center.
 
 ## Showcase
 
 ### Main UI
 
-Real screenshot from the current app:
-
 ![Open Island real screenshot](./assets/media/open-island-real-screenshot.png)
 
-This is the current notch panel UI showing multiple active sessions and their latest state.
-
-### Branded Hero
-
-![Open Island main interface](./assets/media/open-island-main-interface.png)
-
-A polished hero-style asset for the GitHub landing section, useful for social cards and project summaries.
+The notch panel shows multiple active sessions and their latest state at a glance.
 
 ### Permission Approval Flow
 
 ![Open Island permission approval flow](./assets/media/open-island-permission-flow.gif)
 
-Illustrates the intended approval flow: detect a permission request, surface it in the panel, and act on it without hunting through terminal windows.
+Permission requests can be captured, displayed, and acted on from the desktop panel.
 
 ### Terminal / JetBrains Routing Overview
 
 ![Open Island terminal and JetBrains routing overview](./assets/media/open-island-terminal-jetbrains-flow.png)
 
-High-level diagram showing how local Terminal / iTerm / JetBrains sessions reach the bridge and return to the notch panel.
+Local shells and IDE sessions send hook events into the bridge, while the panel gives you a return path to the right workspace.
 
-Packaging:
+## Supported Workflows
 
-- build a DMG locally with `bash scripts/package-dmg.sh <version>`
-- publish the resulting DMG as a GitHub Release asset
-- current DMG builds are unsigned developer-preview builds unless signing/notarization is added
-
-## Why This Exists
-
-CLI coding agents are powerful, but once you have multiple sessions across Terminal, iTerm, Claude Code, Codex, and IDE terminals, it becomes hard to track what is running and where attention is needed. Open Island turns that activity into a lightweight ambient UI that stays visible while you work.
-
-## Supported Tools
-
-Primary support today:
+Primary agent support today:
 
 - Claude Code
 - Codex
 
-The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code and Codex.
+Current jump coverage:
+
+- Terminal
+- iTerm
+- JetBrains IDEs, with known edge cases for embedded terminals and same-project multi-window routing
+
+The architecture is intentionally small and extensible: agent hooks and bridge events are separate from the SwiftUI/AppKit panel, so more local agent integrations can be added without changing the core product shape.
 
 ## Status
 
-Open Island is already usable for local macOS workflows centered on Terminal, iTerm, Claude Code, and Codex. It is still an early preview, but the core loop is in place: session monitoring, panel rendering, permission surfacing, and basic jump behavior are working.
+Open Island is an early preview. The core loop is already usable for local macOS workflows centered on Terminal, iTerm, Claude Code, and Codex: session monitoring, panel rendering, supported permission surfacing, and basic jump behavior are in place.
 
 What works well today:
 
-- personal and local developer workflows
-- bridge, panel rendering, and supported permission flows
-- terminal and iTerm jump behavior
+- Personal local developer workflows
+- Bridge communication and panel rendering
+- Supported permission request flows
+- Terminal and iTerm jump behavior
 
-Current rough edges:
+Current boundaries:
 
 - JetBrains embedded terminal routing still has edge cases
-- same-project multi-window JetBrains routing is not consistently precise
-- some interactions depend on Accessibility and AppleScript stability
+- Same-project multi-window JetBrains routing is not consistently precise
+- Some interactions depend on macOS Accessibility and AppleScript stability
 
 Near-term focus:
 
-- improve JetBrains routing and reduce multi-window misses
-- harden permission and jump behavior
-- add more tests and packaging polish
+- Improve JetBrains routing and reduce multi-window misses
+- Harden permission and jump behavior
+- Add more tests and packaging polish
 
-## Requirements
+## Quick Start
+
+### Requirements
 
 - macOS 13 or later
 - Node.js available in `PATH`
 - Swift 5.9 or Xcode command line tools
 - Accessibility permission enabled for reliable jump and automation behavior
 
-## Installation
-
-### Quick Start
-
-Install the launcher and local hooks:
+### Install local hooks and launcher
 
 ```bash
 ./scripts/install-hooks.sh
@@ -120,13 +149,43 @@ If `open-island` is not found in the current shell:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-If you are distributing the packaged app to users, see:
+On first run, open:
+
+```text
+System Settings -> Privacy & Security -> Accessibility
+```
+
+Allow the terminal or app you use to launch Open Island. Without this permission, the panel may still render, but jump and automation behavior can fail.
+
+## How It Works
+
+```text
+Claude Code / Codex / local shell
+  -> hook or wrapper event
+Node.js bridge
+  -> local Unix socket
+SwiftUI + AppKit notch panel
+  -> visible state, approval controls, jump action
+Terminal / iTerm / IDE
+```
+
+The bridge is local-only. If Open Island is not running, the agent workflow should continue normally; hooks are designed to be a lightweight observation layer rather than a hard dependency.
+
+## Packaged Builds
+
+For distribution builds:
+
+- Build a DMG locally with `bash scripts/package-dmg.sh <version>`
+- Publish the resulting DMG as a GitHub Release asset
+- Current DMG builds are unsigned developer-preview builds unless signing and notarization are added
+
+See:
 
 - [Unsigned macOS install guide](./docs/unsigned-macos-install.md)
 - [Release checklist](./docs/release-checklist.md)
 - [Changelog](./CHANGELOG.md)
 
-### Development Startup
+## Development
 
 Run the bridge:
 
@@ -144,24 +203,12 @@ swift build
 swift run NotchMonitor
 ```
 
-## First Run Setup
+If you change hook, wrapper, or jump behavior, restart the app before retesting:
 
-Open Island depends on macOS Accessibility for window activation, terminal jump, and approval interactions.
-
-On first run, check:
-
-- System Settings -> Privacy & Security -> Accessibility
-- Allow the terminal or app you use to launch Open Island
-
-Without this permission, the panel may still render, but jump and automation behavior can fail.
-
-## Usage
-
-1. Start Open Island with `open-island start`
-2. Launch Claude Code or Codex normally
-3. Watch live sessions appear in the notch panel
-4. Click a session to jump back to its terminal or IDE
-5. Use the panel to review supported permission prompts
+```bash
+open-island stop
+open-island start
+```
 
 ## Project Structure
 
@@ -183,26 +230,6 @@ open-island/
 │   └── install-hooks.sh
 └── docs/
     └── implementation notes and design docs
-```
-
-## Development
-
-Common commands:
-
-```bash
-cd bridge && npm install
-cd bridge && npm start
-cd bridge && npm run dev
-
-cd native/NotchMonitor && swift build
-cd native/NotchMonitor && swift run NotchMonitor
-```
-
-If you change hook, wrapper, or jump behavior, restart the app before retesting:
-
-```bash
-open-island stop
-open-island start
 ```
 
 ## Troubleshooting
@@ -230,7 +257,7 @@ swift build
 Check:
 
 - Open Island is running
-- the bridge is up
+- The bridge is up
 - Accessibility permission is enabled
 
 Then inspect logs:
@@ -249,38 +276,12 @@ This is a known limitation in the current early-preview build. Open Island can u
 
 ### Does this work outside macOS?
 
-No. The app depends on macOS UI automation, menu bar APIs, and Unix-domain local tooling assumptions.
+No. The app depends on macOS UI automation, menu bar APIs, and local Unix-domain workflow assumptions.
 
 ### Does it support remote agents or cloud-hosted sessions?
 
 Not today. The current design is for local developer workflows on one Mac.
 
-### Why is JetBrains jump behavior less reliable than Terminal or iTerm?
+### Does Open Island upload my agent activity?
 
-JetBrains exposes less stable UI automation surface area than Terminal and iTerm. Open Island can usually bring the correct IDE to the foreground, but precise same-project multi-window routing is still limited.
-
-### Does it support Codex out of the box?
-
-Yes. The installer creates a local wrapper for Codex so Open Island can observe sessions without changing your normal command.
-
-## Logs
-
-Useful debug logs:
-
-- `/tmp/notch-monitor-jump.log`
-- `/tmp/notch-monitor-hook.log`
-- `/tmp/notch-monitor-codex-wrapper.log`
-
-## Contributing
-
-Issues and PRs are welcome.
-
-Recommended local validation before sending a change:
-
-- `cd native/NotchMonitor && swift build`
-- `cd bridge && npm install`
-- manually verify bridge startup, panel rendering, permission prompts, and jump behavior
-
-## License
-
-MIT
+No. The current bridge is local-only and communicates over a local Unix socket.
