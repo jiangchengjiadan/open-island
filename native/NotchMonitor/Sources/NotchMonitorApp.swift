@@ -736,9 +736,19 @@ class NotchPanelWindow: NSPanel {
             return NSSize(width: expandedWidth, height: height)
         }
 
-        let rowCount = min(max(agentCount, 1), 6)
-        let height = CGFloat(24 + (rowCount * 54))
+        let visibleAgents = Array(SocketService.shared.agents.prefix(6))
+        let rowsHeight = visibleAgents.reduce(CGFloat(0)) { total, agent in
+            total + expandedRowHeight(for: agent)
+        }
+        let height = 16 + rowsHeight
         return NSSize(width: expandedWidth, height: height)
+    }
+
+    private func expandedRowHeight(for agent: Agent) -> CGFloat {
+        if agent.needsPermission || agent.interactivePrompt != nil {
+            return 98
+        }
+        return 54
     }
 
     deinit {

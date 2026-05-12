@@ -64,6 +64,9 @@ function matcherOf(payload) {
     payload.tool_name ||
     payload.toolName ||
     payload.tool ||
+    payload.tool?.name ||
+    payload.data?.tool_name ||
+    payload.data?.toolName ||
     payload.permission?.tool_name ||
     payload.permission?.toolName ||
     ''
@@ -94,6 +97,11 @@ function sessionNameOf(source, payload) {
 }
 
 function terminalOf() {
+  const inferredApp = inferredTerminalApp(processChainOf(process.ppid));
+  if (inferredApp) {
+    return inferredApp;
+  }
+
   return (
     process.env.TERM_PROGRAM_APP ||
     process.env.TERM_PROGRAM ||
@@ -101,6 +109,64 @@ function terminalOf() {
     process.env.TTY ||
     os.hostname()
   );
+}
+
+function tmuxSocketPathFromEnv(env) {
+  const raw = (env.TMUX || '').trim();
+  if (!raw) return '';
+  const separatorIndex = raw.indexOf(',');
+  if (separatorIndex === -1) return raw;
+  return raw.slice(0, separatorIndex);
+}
+
+function tmuxTargetOf(env) {
+  const pane = (env.TMUX_PANE || '').trim();
+  if (!pane) return '';
+
+  try {
+    const socketPath = tmuxSocketPathFromEnv(env);
+    const args = socketPath
+      ? ['-S', socketPath, 'display-message', '-p', '-t', pane, '#S:#I.#P']
+      : ['display-message', '-p', '-t', pane, '#S:#I.#P'];
+    const output = execFileSync('/usr/bin/env', ['tmux', ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env,
+    }).trim();
+    return output;
+  } catch (_) {
+    return '';
+  }
+}
+
+function inferredTerminalApp(processChain) {
+  const termProgramApp = (process.env.TERM_PROGRAM_APP || '').trim();
+  if (termProgramApp) return termProgramApp;
+
+  const termProgram = (process.env.TERM_PROGRAM || '').trim();
+  const joined = (processChain || []).join(' ').toLowerCase();
+
+  if (process.env.VSCODE_GIT_IPC_HANDLE) {
+    if (joined.includes('cursor')) return 'Cursor';
+    return 'Visual Studio Code';
+  }
+
+  if (process.env.ITERM_SESSION_ID) {
+    return 'iTerm';
+  }
+
+  if (termProgram && termProgram.toLowerCase() !== 'tmux') {
+    return termProgram;
+  }
+
+  if (joined.includes('cursor')) return 'Cursor';
+  if (joined.includes('visual studio code') || joined.includes('vscode') || joined.includes(':code ') || joined.endsWith(':code')) return 'Visual Studio Code';
+  if (joined.includes('iterm')) return 'iTerm';
+  if (joined.includes('warp')) return 'Warp';
+  if (joined.includes('ghostty')) return 'Ghostty';
+  if (joined.includes('terminal')) return 'Terminal';
+
+  return '';
 }
 
 function ttyOf() {
@@ -177,13 +243,27 @@ function collectEnvHints() {
     'ITERM_SESSION_ID',
     'ITERM_PROFILE',
     'VSCODE_GIT_IPC_HANDLE',
+    'TMUX',
+    'TMUX_PANE',
   ];
 
-  return Object.fromEntries(
+  const hints = Object.fromEntries(
     keys
       .map((key) => [key, process.env[key]])
       .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
   );
+
+  const tmuxTarget = tmuxTargetOf(process.env);
+  if (tmuxTarget) {
+    hints.TMUX_TARGET = tmuxTarget;
+  }
+
+  const tmuxSocketPath = tmuxSocketPathFromEnv(process.env);
+  if (tmuxSocketPath) {
+    hints.TMUX_SOCKET_PATH = tmuxSocketPath;
+  }
+
+  return hints;
 }
 
 function collectJetBrainsContext() {
@@ -279,29 +359,98 @@ function statusFromEvent(eventName, payload) {
 }
 
 function toolNeedsApproval(toolName) {
+  const normalized = normalizePermissionPart(toolName).toLowerCase();
   const mutableTools = new Set([
-    'Bash',
-    'Edit',
-    'Write',
-    'MultiEdit',
-    'NotebookEdit',
-    'Task',
+    'bash',
+    'edit',
+    'write',
+    'multiedit',
+    'notebookedit',
+    'task',
+    'shell',
+    'runshellcommand',
+    'run_shell_command',
   ]);
-  return mutableTools.has(toolName);
+  return mutableTools.has(normalized);
 }
 
 function permissionMessage(toolName, payload) {
-  const toolInput = payload.tool_input || payload.toolInput || payload.input || {};
-  const filePath = toolInput.file_path || toolInput.filePath || toolInput.path;
-  const command = toolInput.command || toolInput.cmd;
+  const toolInput = toolInputOf(payload);
+  const filePath = permissionFilePath(payload, false);
+  const command = permissionCommand(payload);
   const target = filePath || command || JSON.stringify(toolInput);
   return `${toolName}${target ? ` ${target}` : ''}`;
 }
 
-function permissionOutput(eventName, allowed) {
-  return {
+function toolInputOf(payload) {
+  return (
+    payload.tool_input ||
+    payload.toolInput ||
+    payload.input ||
+    payload.data?.tool_input ||
+    payload.data?.toolInput ||
+    payload.permission?.tool_input ||
+    payload.permission?.toolInput ||
+    payload.tool?.input ||
+    {}
+  );
+}
+
+function permissionFilePath(payload, resolvePath = true) {
+  const toolInput = toolInputOf(payload);
+  const filePath = toolInput.file_path || toolInput.filePath || toolInput.path;
+  if (!filePath || !resolvePath) return filePath || null;
+  if (path.isAbsolute(filePath)) return filePath;
+  return path.resolve(payload.cwd || process.cwd(), filePath);
+}
+
+function permissionCommand(payload) {
+  const toolInput = toolInputOf(payload);
+  return toolInput.command || toolInput.cmd || null;
+}
+
+function normalizePermissionPart(value) {
+  if (value == null) return '';
+  return String(value).trim().replace(/\s+/g, ' ');
+}
+
+function stablePermissionInput(value) {
+  if (Array.isArray(value)) {
+    return value.map(stablePermissionInput);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = stablePermissionInput(value[key]);
+      return result;
+    }, {});
+  }
+  return value;
+}
+
+function permissionKey(toolName, payload) {
+  const type = normalizePermissionPart(toolName);
+  if (!type) return '';
+
+  if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(type)) {
+    return `${type}:file:${normalizePermissionPart(permissionFilePath(payload))}`;
+  }
+
+  if (type === 'Bash') {
+    return `${type}:command:${normalizePermissionPart(permissionCommand(payload))}`;
+  }
+
+  return `${type}:input:${normalizePermissionPart(JSON.stringify(stablePermissionInput(toolInputOf(payload))))}`;
+}
+
+function permissionOutput(source, eventName, allowed) {
+  if (source === 'codex') {
+    return {
+      continue: Boolean(allowed),
+    };
+  }
+
+  const output = {
     continue: true,
-    suppressOutput: true,
     hookSpecificOutput: {
       hookEventName: eventName,
       permissionDecision: allowed ? 'allow' : 'deny',
@@ -310,6 +459,12 @@ function permissionOutput(eventName, allowed) {
         : 'Denied in NotchMonitor',
     },
   };
+
+  if (source !== 'codex') {
+    output.suppressOutput = true;
+  }
+
+  return output;
 }
 
 class BridgeClient {
@@ -426,7 +581,7 @@ async function runEventHook(source) {
   const sessionName = sessionNameOf(source, payload);
   const agentId = `${source}:${sessionId}`;
   const parentInfo = processInfoOf(process.ppid);
-  const terminalTitleToken = isJetBrainsTerminal() ? terminalTitleTokenFor(source, process.ppid, sessionId) : null;
+  const terminalTitleToken = ttyDevicePath() ? terminalTitleTokenFor(source, process.ppid, sessionId) : null;
   const agent = {
     id: agentId,
     name: sessionName,
@@ -466,21 +621,23 @@ async function runEventHook(source) {
     }
 
     if (eventName === 'PreToolUse' && toolNeedsApproval(matcherOf(payload))) {
+      const toolName = matcherOf(payload);
       const requestId = `${agentId}:${Date.now()}`;
       const request = {
         id: requestId,
-        type: matcherOf(payload),
-        message: permissionMessage(matcherOf(payload), payload),
-        filePath:
-          payload.tool_input?.file_path ||
-          payload.toolInput?.filePath ||
-          payload.input?.path ||
-          null,
+        type: toolName,
+        message: permissionMessage(toolName, payload),
+        filePath: permissionFilePath(payload),
+        command: permissionCommand(payload),
+        permissionKey: permissionKey(toolName, payload),
         timestamp: Date.now(),
       };
 
       const allowed = await client.requestPermission(request);
-      process.stdout.write(`${JSON.stringify(permissionOutput(eventName, allowed))}\n`);
+      process.stdout.write(`${JSON.stringify(permissionOutput(source, eventName, allowed))}\n`);
+    } else if (source === 'qoder' && eventName === 'PreToolUse') {
+      const toolName = matcherOf(payload);
+      log(`qoder pretool observed without approval tool=${toolName || '<unknown>'} keys=${Object.keys(payload).sort().join(',')}`);
     }
   } catch (error) {
     fs.appendFileSync(HOOK_LOG_PATH, `[${new Date().toISOString()}] Hook error (${source}/${eventName}): ${error.message}\n`);
@@ -505,7 +662,7 @@ async function runLegacyRegister(agentName, agentType = 'claude') {
       tty: ttyOf(),
       cwd: process.cwd(),
       pid: process.ppid,
-      terminalTitleToken: isJetBrainsTerminal() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
+      terminalTitleToken: ttyDevicePath() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
       parentPid: processInfoOf(process.ppid)?.ppid || null,
       parentCommand: processInfoOf(process.ppid)?.command || null,
       processChain: processChainOf(process.ppid),
@@ -538,7 +695,7 @@ async function runLegacyUpdate(status, currentTask, agentType = 'claude') {
       tty: ttyOf(),
       cwd: process.cwd(),
       pid: process.ppid,
-      terminalTitleToken: isJetBrainsTerminal() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
+      terminalTitleToken: ttyDevicePath() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
       parentPid: processInfoOf(process.ppid)?.ppid || null,
       parentCommand: processInfoOf(process.ppid)?.command || null,
       processChain: processChainOf(process.ppid),

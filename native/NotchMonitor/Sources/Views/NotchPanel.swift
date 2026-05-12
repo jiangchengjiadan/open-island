@@ -26,7 +26,7 @@ struct NotchPanelView: View {
                     }
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: CGFloat(maxVisibleRows * 54 + 16))
+                .frame(maxHeight: scrollMaxHeight)
             }
         }
         .frame(width: 520, height: panelHeight, alignment: .top)
@@ -49,11 +49,25 @@ struct NotchPanelView: View {
             }
             return min(286, CGFloat(112 + (min(issueCount, 4) * 42)))
         }
-        let rowCount = min(max(socketService.agents.count, 1), maxVisibleRows)
-        return CGFloat(24 + (rowCount * 54))
+        return scrollMaxHeight
     }
 
     private var maxVisibleRows: Int { 6 }
+
+    private var scrollMaxHeight: CGFloat {
+        let visibleAgents = Array(socketService.agents.prefix(maxVisibleRows))
+        let rowsHeight = visibleAgents.reduce(CGFloat(0)) { total, agent in
+            total + rowHeight(for: agent)
+        }
+        return 16 + rowsHeight
+    }
+
+    private func rowHeight(for agent: Agent) -> CGFloat {
+        if agent.needsPermission || agent.interactivePrompt != nil {
+            return 98
+        }
+        return 54
+    }
 }
 
 struct EmptyStateView: View {
@@ -259,6 +273,7 @@ struct CompactAgentRow: View {
                 InlineApprovalBar(
                     request: request,
                     onAllow: { respondToPermission(agent.id, allowed: true) },
+                    onAllowSimilar: { respondToPermission(agent.id, allowed: true, scope: "session_similar") },
                     onDeny: { respondToPermission(agent.id, allowed: false) }
                 )
                 .padding(.horizontal, 14)
@@ -295,6 +310,9 @@ struct CompactAgentRow: View {
                 Button("Allow") {
                     respondToPermission(agent.id, allowed: true)
                 }
+                Button("Allow Similar") {
+                    respondToPermission(agent.id, allowed: true, scope: "session_similar")
+                }
                 Button("Deny") {
                     respondToPermission(agent.id, allowed: false)
                 }
@@ -309,7 +327,13 @@ struct CompactAgentRow: View {
         if let prompt = agent.interactivePrompt {
             return prompt.title
         }
-        return agent.name.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces)
+        let trimmedName = agent.name.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces)
+        if (trimmedName == "claude-session" || trimmedName == "codex" || trimmedName == "cursor-session"),
+           let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cwd.isEmpty {
+            return URL(fileURLWithPath: cwd).lastPathComponent
+        }
+        return trimmedName
     }
 
     private var secondaryLine: String {
@@ -361,13 +385,45 @@ struct CompactAgentRow: View {
     }
 
     private var terminalLabel: String {
-        let raw = (agent.terminalApp ?? agent.terminal).lowercased()
+        let raw = inferredTerminalLabelSource().lowercased()
         if raw.contains("iterm") { return "iTerm" }
         if raw.contains("terminal") { return "Terminal" }
         if raw.contains("ghostty") { return "Ghostty" }
+        if raw.contains("warp") { return "Warp" }
+        if raw.contains("cursor") { return "Cursor" }
+        if raw.contains("vscode") || raw.contains("visual studio code") || raw == "code" { return "VS Code" }
         if raw.contains("pycharm") { return "PyCharm" }
         if raw.contains("idea") { return "IDEA" }
         return "Shell"
+    }
+
+    private func inferredTerminalLabelSource() -> String {
+        let candidates = [
+            agent.terminalApp,
+            agent.environmentHints?["TERM_PROGRAM_APP"],
+            agent.environmentHints?["TERM_PROGRAM"],
+            inferredTerminalAppFromProcessChain()
+        ]
+
+        for candidate in candidates {
+            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return agent.terminal
+    }
+
+    private func inferredTerminalAppFromProcessChain() -> String? {
+        let joined = (agent.processChain ?? []).joined(separator: " ").lowercased()
+        if joined.contains("cursor") { return "Cursor" }
+        if joined.contains("visual studio code") || joined.contains("vscode") || joined.contains(":code ") || joined.hasSuffix(":code") {
+            return "Visual Studio Code"
+        }
+        if joined.contains("iterm") { return "iTerm" }
+        if joined.contains("terminal") { return "Terminal" }
+        return nil
     }
 
     private var durationLabel: String {
@@ -392,11 +448,11 @@ struct CompactAgentRow: View {
         TerminalJumpService.jump(to: agent)
     }
 
-    func respondToPermission(_ agentId: String, allowed: Bool) {
+    func respondToPermission(_ agentId: String, allowed: Bool, scope: String = "once") {
         NotificationCenter.default.post(
             name: .init("PermissionResponse"),
             object: nil,
-            userInfo: ["agentId": agentId, "allowed": allowed]
+            userInfo: ["agentId": agentId, "allowed": allowed, "scope": scope]
         )
     }
 
@@ -409,6 +465,7 @@ struct CompactAgentRow: View {
 struct InlineApprovalBar: View {
     let request: PermissionRequest
     let onAllow: () -> Void
+    let onAllowSimilar: () -> Void
     let onDeny: () -> Void
 
     var body: some View {
@@ -424,6 +481,8 @@ struct InlineApprovalBar: View {
 
             InlineActionButton(title: "Deny", tint: Color(hex: "#7c2d2b"), foreground: Color(hex: "#ffe7e4"), action: onDeny)
             InlineActionButton(title: "Allow", tint: Color(hex: "#9ddab4"), foreground: Color(hex: "#08281d"), action: onAllow)
+            InlineActionButton(title: "Allow Similar", tint: Color(hex: "#f5c36b"), foreground: Color(hex: "#2a1805"), action: onAllowSimilar)
+                .help("Approve matching requests in this session")
         }
     }
 }

@@ -55,9 +55,9 @@ Open Island pulls those signals out of the terminal layer and makes them visible
 
 ## Core Capabilities
 
-- **Ambient visibility**: collect local Claude Code and Codex sessions into one notch-style panel, with clear running, waiting, completed, and error states.
+- **Ambient visibility**: collect local Claude Code, Codex, and Qoder sessions into one notch-style panel, with clear running, waiting, completed, and error states.
 - **Desktop-level approval**: surface supported permission requests directly in the panel, so you can approve or deny without breaking out of the current IDE context.
-- **Instant context jump**: click a session card to return to the owning Terminal, iTerm, or supported IDE route instead of manually searching for the right window.
+- **Instant context jump**: click a session card to return to the owning Terminal, iTerm, Ghostty, Warp, VS Code, Cursor, or supported IDE route instead of manually searching for the right window.
 - **Local-first bridge**: use a small Node.js Unix socket bridge and native macOS UI; no cloud relay, account, or remote telemetry is required.
 - **Workflow-preserving design**: keep using your existing `claude`, `codex`, terminal, and IDE habits. Open Island observes and coordinates; it does not force a new command center.
 
@@ -87,14 +87,19 @@ Primary agent support today:
 
 - Claude Code
 - Codex
+- Qoder CLI
 
 Current jump coverage:
 
 - Terminal
 - iTerm
+- Ghostty
+- Warp
+- VS Code
+- Cursor
 - JetBrains IDEs, with known edge cases for embedded terminals and same-project multi-window routing
 
-The architecture is intentionally small and extensible: agent hooks and bridge events are separate from the SwiftUI/AppKit panel, so more local agent integrations can be added without changing the core product shape.
+The architecture is intentionally small and extensible: agent hooks and bridge events are separate from the SwiftUI/AppKit panel, so more local agent integrations can be added without changing the core product shape. The current first-class workflow is centered on Claude Code, Codex, and Qoder on local macOS workflows.
 
 ## Status
 
@@ -106,11 +111,15 @@ What works well today:
 - Bridge communication and panel rendering
 - Supported permission request flows
 - Terminal and iTerm jump behavior
+- VS Code and Cursor workspace jump
+- Codex default hook install and session de-duplication
+- Qoder session monitoring
 
 Current boundaries:
 
 - JetBrains embedded terminal routing still has edge cases
 - Same-project multi-window JetBrains routing is not consistently precise
+- Ghostty and Warp jump are still best-effort first versions
 - Some interactions depend on macOS Accessibility and AppleScript stability
 
 Near-term focus:
@@ -133,6 +142,8 @@ Near-term focus:
 ```bash
 ./scripts/install-hooks.sh
 ```
+
+This installs Claude, Qoder, and Codex hooks, the Codex wrapper, and the `open-island` launcher.
 
 Then use:
 
@@ -209,6 +220,25 @@ If you change hook, wrapper, or jump behavior, restart the app before retesting:
 open-island stop
 open-island start
 ```
+
+## Usage
+
+1. Start Open Island with `open-island start`
+2. Launch Claude Code, Codex, or Qoder normally
+3. Watch live sessions appear in the notch panel
+4. Click a session to jump back to its terminal or IDE
+5. Use the panel to review supported permission prompts
+
+## Recent Work
+
+- Codex hooks are installed by default
+- Codex permission hooks were updated for current CLI compatibility
+- Codex auxiliary process/session de-duplication was tightened
+- stale session cleanup and permission-request queueing were added to the bridge
+- bootstrap diagnostics can now attempt limited self-heal
+- iTerm/tmux jump was reworked toward session-first behavior
+- VS Code/Cursor jump now prefers workspace reopen via the editor CLI
+- Qoder hooks and session monitoring were added
 
 ## Project Structure
 

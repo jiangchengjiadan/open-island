@@ -54,7 +54,8 @@ class SocketService: ObservableObject {
                 return
             }
 
-            self.sendPermissionResponse(agentId: agentId, allowed: allowed)
+            let scope = notification.userInfo?["scope"] as? String ?? "once"
+            self.sendPermissionResponse(agentId: agentId, allowed: allowed, scope: scope)
         }
     }
 
@@ -227,7 +228,7 @@ class SocketService: ObservableObject {
         }
     }
 
-    func sendPermissionResponse(agentId: String, allowed: Bool) {
+    func sendPermissionResponse(agentId: String, allowed: Bool, scope: String = "once") {
         guard let agent = agents.first(where: { $0.id == agentId }) else { return }
 
         let payload = PermissionResponseMessage(
@@ -235,7 +236,9 @@ class SocketService: ObservableObject {
             data: PermissionResponseData(
                 agentId: agentId,
                 requestId: agent.permissionRequest?.id ?? agentId,
-                allowed: allowed
+                allowed: allowed,
+                scope: scope,
+                permissionKey: agent.permissionRequest?.permissionKey
             )
         )
         send(payload)
@@ -360,15 +363,19 @@ class SocketService: ObservableObject {
 
                 guard let agentType = self.inferredAgentType(command: command, args: args) else { continue }
 
-                if agentType == .codex, self.isInteractiveCodexProcess(command: command, args: args, tty: tty) {
-                    activeCodexProcesses.append(
-                        CodexProcessSnapshot(
-                            pid: pid,
-                            tty: tty == "??" ? "background" : tty,
-                            command: command,
-                            args: args
+                if agentType == .codex {
+                    if self.isInteractiveCodexProcess(command: command, args: args, tty: tty) {
+                        activeCodexProcesses.append(
+                            CodexProcessSnapshot(
+                                pid: pid,
+                                tty: tty == "??" ? "background" : tty,
+                                command: command,
+                                args: args
+                            )
                         )
-                    )
+                    }
+                    // Codex sessions are merged separately so helper processes do not leak into the generic process list.
+                    continue
                 }
 
                 let id = "process-\(pid)"
@@ -582,7 +589,9 @@ class SocketService: ObservableObject {
     }
 
     private func refreshCodexAgents(activeProcesses: [CodexProcessSnapshot]) {
-        guard !activeProcesses.isEmpty else {
+        let primaryProcesses = deduplicatedCodexProcesses(activeProcesses)
+
+        guard !primaryProcesses.isEmpty else {
             codexAgents = [:]
             return
         }
@@ -596,7 +605,7 @@ class SocketService: ObservableObject {
         else {
             print("Codex monitor: failed to read history or sessions directory")
             codexAgents = Dictionary(
-                uniqueKeysWithValues: activeProcesses.map { process in
+                uniqueKeysWithValues: primaryProcesses.map { process in
                     let agent = Agent(
                         id: "codex-process:\(process.pid)",
                         name: "codex",
@@ -679,7 +688,7 @@ class SocketService: ObservableObject {
         recentSessions.sort { $0.lastUpdate > $1.lastUpdate }
 
         var detected: [String: Agent] = [:]
-        for (index, process) in activeProcesses.enumerated() {
+        for (index, process) in primaryProcesses.enumerated() {
             if index < recentSessions.count {
                 let sessionAgent = recentSessions[index]
                 let agent = Agent(
@@ -715,7 +724,51 @@ class SocketService: ObservableObject {
         }
 
         codexAgents = detected
-        print("Codex monitor: built \(detected.count) visible codex agent(s) from \(activeProcesses.count) active codex process(es)")
+        print("Codex monitor: built \(detected.count) visible codex agent(s) from \(primaryProcesses.count) primary codex process(es)")
+    }
+
+    private func deduplicatedCodexProcesses(_ processes: [CodexProcessSnapshot]) -> [CodexProcessSnapshot] {
+        var selectedByTTY: [String: CodexProcessSnapshot] = [:]
+
+        for process in processes {
+            let key = normalizedTTY(process.tty) ?? process.tty
+            if let existing = selectedByTTY[key] {
+                selectedByTTY[key] = preferredCodexProcess(existing, process)
+            } else {
+                selectedByTTY[key] = process
+            }
+        }
+
+        return Array(selectedByTTY.values).sorted { lhs, rhs in
+            codexProcessScore(lhs) == codexProcessScore(rhs)
+                ? lhs.pid < rhs.pid
+                : codexProcessScore(lhs) > codexProcessScore(rhs)
+        }
+    }
+
+    private func preferredCodexProcess(_ lhs: CodexProcessSnapshot, _ rhs: CodexProcessSnapshot) -> CodexProcessSnapshot {
+        let lhsScore = codexProcessScore(lhs)
+        let rhsScore = codexProcessScore(rhs)
+        if lhsScore != rhsScore {
+            return lhsScore > rhsScore ? lhs : rhs
+        }
+
+        return lhs.pid < rhs.pid ? lhs : rhs
+    }
+
+    private func codexProcessScore(_ process: CodexProcessSnapshot) -> Int {
+        var score = 0
+        let command = process.command.lowercased()
+        let args = process.args.lowercased()
+
+        if command == "codex" { score += 100 }
+        if args.hasPrefix("codex ") || args == "codex" { score += 80 }
+        if !args.contains("hook.js") { score += 40 }
+        if !args.contains("wrapper") { score += 25 }
+        if !args.contains("node ") { score += 20 }
+        if process.tty != "background" { score += 15 }
+
+        return score
     }
 
     private func inferredAgentType(command: String, args: String) -> AgentType? {
@@ -732,6 +785,9 @@ class SocketService: ObservableObject {
         }
         if haystack.contains("gemini") {
             return .gemini
+        }
+        if haystack.contains("qodercli") || haystack.contains("qoder-cli") || haystack.contains("qoder") {
+            return .qoder
         }
         if haystack.contains("opencode") || haystack.contains("open_code") {
             return .openCode
@@ -926,6 +982,8 @@ private struct PermissionRequestPayload: Decodable {
     let type: String
     let message: String
     let filePath: String?
+    let command: String?
+    let permissionKey: String?
     let timestamp: Double?
 
     func asPermissionRequest() -> PermissionRequest {
@@ -934,6 +992,8 @@ private struct PermissionRequestPayload: Decodable {
             type: type,
             message: message,
             filePath: filePath,
+            command: command,
+            permissionKey: permissionKey,
             timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
         )
     }
@@ -948,6 +1008,8 @@ private struct PermissionResponseData: Encodable {
     let agentId: String
     let requestId: String
     let allowed: Bool
+    let scope: String
+    let permissionKey: String?
 }
 
 // MARK: - Color Extension

@@ -35,13 +35,19 @@ install_bridge() {
     echo -e "${BLUE}Installing bridge dependencies...${NC}"
     
     cd "$REPO_ROOT/bridge"
-    npm install
+
+    if [ "${FORCE_BRIDGE_INSTALL:-0}" != "1" ]; then
+        echo -e "${GREEN}✓ Bridge dependencies already installed${NC}"
+        return
+    fi
+
+    npm install --no-audit --no-fund
     
     echo -e "${GREEN}✓ Bridge dependencies installed${NC}"
 }
 
 install_tool_hooks() {
-    echo -e "${BLUE}Installing Claude hooks and silent Codex monitoring...${NC}"
+    echo -e "${BLUE}Installing Claude, Qoder, and Codex hooks...${NC}"
     node "$SCRIPT_DIR/auto-install-hooks.js"
     node "$SCRIPT_DIR/install-codex-wrapper.js"
     echo -e "${GREEN}✓ Hooks installed${NC}"
