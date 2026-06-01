@@ -47,7 +47,7 @@ install_bridge() {
 }
 
 install_tool_hooks() {
-    echo -e "${BLUE}Installing Claude, Qoder, and Codex hooks...${NC}"
+    echo -e "${BLUE}Installing Claude, Cursor, Gemini, Qoder, and Codex hooks...${NC}"
     node "$SCRIPT_DIR/auto-install-hooks.js"
     node "$SCRIPT_DIR/install-codex-wrapper.js"
     echo -e "${GREEN}✓ Hooks installed${NC}"

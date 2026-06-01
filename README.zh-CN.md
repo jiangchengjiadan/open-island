@@ -58,6 +58,8 @@ Open Island 的目标，就是把这些本地 Agent 状态从终端黑盒里“�
 - **多会话状态，全局可见**：把本地 Claude Code、Codex 和 Qoder 会话汇聚到一个刘海面板里，清楚区分运行中、等待中、已完成和异常状态。
 - **桌面级权限审批**：支持的权限请求会直接出现在面板中，你可以在当前 IDE 视线内完成批准或拒绝，不必切回终端。
 - **一键回到现场**：点击会话卡片即可跳回对应的 Terminal、iTerm、Ghostty、Warp、VS Code、Cursor 或支持的 IDE 路由，减少多项目并行时的上下文迷失。
+- **刘海原生交互**：支持 compact、hover peek、expanded 三态面板，更贴近真实刘海交互。
+- **Usage 可视化**：在参考 CodexIsland 视觉的 usage 页面中查看 Claude 和 Codex 的 5 小时 / 每周用量窗口。
 - **纯本地 Bridge**：通过小型 Node.js Unix socket bridge 和 macOS 原生 UI 通信，不依赖云端中转、账号或远程遥测。
 - **不改变原有习惯**：继续按原来的方式使用 `claude`、`codex`、终端和 IDE。Open Island 只是观察、汇聚和协调。
 
@@ -87,6 +89,8 @@ Open Island 的目标，就是把这些本地 Agent 状态从终端黑盒里“�
 
 - Claude Code
 - Codex
+- Cursor
+- Gemini CLI
 - Qoder CLI
 
 当前跳转覆盖：
@@ -99,7 +103,7 @@ Open Island 的目标，就是把这些本地 Agent 状态从终端黑盒里“�
 - Cursor
 - JetBrains IDEs，但内置终端和同项目多窗口精确路由仍有边界情况
 
-项目结构刻意保持轻量和可扩展：Agent hook、bridge 事件和 SwiftUI/AppKit 面板彼此分离，后续可以继续接入更多本地 Agent，而不需要改变产品核心形态。目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex 和 Qoder。
+项目结构刻意保持轻量和可扩展：Agent hook、bridge 事件和 SwiftUI/AppKit 面板彼此分离，后续可以继续接入更多本地 Agent，而不需要改变产品核心形态。目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex、Cursor、Gemini CLI 和 Qoder。
 
 ## 状态
 
@@ -111,9 +115,12 @@ Open Island 仍然是 early preview，但已经可以用于以 Terminal、iTerm�
 - Bridge 通信与面板渲染
 - 支持的权限审批流程
 - Terminal 和 iTerm 跳转体验
+- compact / peek / expanded 三态 notch 面板交互
 - VS Code 和 Cursor 的 workspace 跳转
 - Codex 默认 hooks 安装和会话去重
+- Gemini CLI 会话监控
 - Qoder 会话监控
+- Claude/Codex usage 展示、刷新和 Claude re-auth 支持
 
 当前边界：
 
@@ -126,6 +133,7 @@ Open Island 仍然是 early preview，但已经可以用于以 Terminal、iTerm�
 
 - 继续改进 JetBrains 路由，减少多窗口误跳
 - 提高权限交互和跳转行为的稳定性
+- 增加基于 Claude/Codex 本地日志的 token/cost 统计
 - 补更多测试和打包完善工作
 
 ## 快速开始
@@ -143,7 +151,7 @@ Open Island 仍然是 early preview，但已经可以用于以 Terminal、iTerm�
 ./scripts/install-hooks.sh
 ```
 
-这一步会安装 Claude、Qoder、Codex 的 hooks，以及 Codex wrapper 和 `open-island` 启动器。
+这一步会安装 Claude、Cursor、Gemini、Qoder、Codex 的 hooks，以及 Codex wrapper 和 `open-island` 启动器。
 
 然后使用：
 
@@ -224,10 +232,11 @@ open-island start
 ## 使用方式
 
 1. 用 `open-island start` 启动 Open Island
-2. 正常启动 Claude Code、Codex 或 Qoder
+2. 正常启动 Claude Code、Codex、Cursor、Gemini CLI 或 Qoder
 3. 观察 notch panel 中实时出现的会话
 4. 点击某个会话，跳回它所属的终端或 IDE
 5. 在面板中查看和处理支持的权限请求
+6. 切到 `Usage` 页查看 Claude 和 Codex 的 5 小时 / 每周用量窗口
 
 ## 最近完成
 
@@ -238,7 +247,12 @@ open-island start
 - bootstrap 诊断可尝试有限自愈
 - iTerm/tmux 跳转向 session-first 重构
 - VS Code/Cursor 跳转优先走 editor CLI 的 workspace reopen
+- 已新增 Cursor hooks 和基于 workspace 的会话识别
+- 新增 Gemini CLI hooks 和会话监控
 - 新增 Qoder hooks 和会话监控
+- notch panel 已改为 compact、hover peek、expanded 三态
+- 新增参考 CodexIsland 视觉的 Claude/Codex usage 页面
+- Claude usage 支持过期 OAuth token 刷新，并在 scope 不足时提供 re-auth 入口
 
 ## 项目结构
 

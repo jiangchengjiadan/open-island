@@ -25,6 +25,7 @@ class SocketService: ObservableObject {
     private var codexAgents: [String: Agent] = [:]
     private var promptCache: [String: PromptCacheEntry] = [:]
     private var pendingPermissionRequests: [String: PermissionRequest] = [:]
+    private var protocolInteractivePromptIDs: [String: String] = [:]
     private var isRefreshingProcesses = false
 
     private init() {}
@@ -180,6 +181,7 @@ class SocketService: ObservableObject {
             guard let id = message.data?.first?.id else { return }
             socketAgents.removeValue(forKey: id)
             pendingPermissionRequests.removeValue(forKey: id)
+            protocolInteractivePromptIDs.removeValue(forKey: id)
             publishAgents()
         case "permission_requested":
             guard
@@ -198,23 +200,72 @@ class SocketService: ObservableObject {
             }
             print("Permission requested for agent \(agentId): \(request.type) \(request.message)")
             publishAgents()
+        case "interaction_requested":
+            guard
+                let payload = message.data?.first,
+                let agentId = payload.agentId,
+                let request = payload.interactionRequest
+            else {
+                return
+            }
+
+            if request.kind == "permission", let permissionRequest = request.asPermissionRequest() {
+                pendingPermissionRequests[agentId] = permissionRequest
+                if var agent = socketAgents[agentId] {
+                    agent.needsPermission = true
+                    agent.permissionRequest = permissionRequest
+                    socketAgents[agentId] = agent
+                }
+            } else if let prompt = request.asInteractivePrompt() {
+                protocolInteractivePromptIDs[agentId] = prompt.id
+                if var agent = socketAgents[agentId] {
+                    agent.interactivePrompt = prompt
+                    socketAgents[agentId] = agent
+                }
+            }
+            publishAgents()
         case "permission_responded":
             guard let requestId = message.data?.first?.requestId else { return }
             print("Permission responded for request \(requestId)")
-            clearPermissionState(for: requestId)
+            clearInteractionState(for: requestId)
+        case "interaction_responded":
+            guard let requestId = message.data?.first?.requestId else { return }
+            clearInteractionState(for: requestId)
         default:
             break
         }
     }
 
-    private func clearPermissionState(for requestId: String) {
+    private func clearInteractionState(for requestId: String) {
+        clearPermissionState(for: requestId, shouldPublish: false)
+        clearInteractivePromptState(for: requestId, shouldPublish: false)
+        publishAgents()
+    }
+
+    private func clearPermissionState(for requestId: String, shouldPublish: Bool = true) {
         for (id, var agent) in socketAgents where agent.permissionRequest?.id == requestId {
             agent.needsPermission = false
             agent.permissionRequest = nil
             socketAgents[id] = agent
             pendingPermissionRequests.removeValue(forKey: id)
         }
-        publishAgents()
+        if shouldPublish {
+            publishAgents()
+        }
+    }
+
+    private func clearInteractivePromptState(for requestId: String, shouldPublish: Bool = true) {
+        for (id, var agent) in socketAgents where agent.interactivePrompt?.id == requestId {
+            agent.interactivePrompt = nil
+            socketAgents[id] = agent
+            promptCache.removeValue(forKey: id)
+            if protocolInteractivePromptIDs[id] == requestId {
+                protocolInteractivePromptIDs.removeValue(forKey: id)
+            }
+        }
+        if shouldPublish {
+            publishAgents()
+        }
     }
 
     private func applyPendingPermissionsToSocketAgents() {
@@ -246,6 +297,7 @@ class SocketService: ObservableObject {
 
     func clearInteractivePrompt(agentId: String) {
         promptCache.removeValue(forKey: agentId)
+        protocolInteractivePromptIDs.removeValue(forKey: agentId)
 
         if var agent = socketAgents[agentId] {
             agent.interactivePrompt = nil
@@ -362,6 +414,7 @@ class SocketService: ObservableObject {
                 let args = columns[3].trimmingCharacters(in: .whitespaces)
 
                 guard let agentType = self.inferredAgentType(command: command, args: args) else { continue }
+                guard !self.shouldSuppressGenericProcessAgent(agentType: agentType, command: command, args: args, tty: tty) else { continue }
 
                 if agentType == .codex {
                     if self.isInteractiveCodexProcess(command: command, args: args, tty: tty) {
@@ -540,6 +593,7 @@ class SocketService: ObservableObject {
 
     private func shouldInspectInteractivePrompt(agent: Agent) -> Bool {
         guard !agent.needsPermission else { return false }
+        guard protocolInteractivePromptIDs[agent.id] == nil else { return false }
         guard let terminalApp = agent.terminalApp?.lowercased(), terminalApp.contains("terminal") else { return false }
         guard let tty = agent.tty, !tty.isEmpty else { return false }
         return agent.status == .waiting || agent.type == .codex
@@ -820,6 +874,26 @@ class SocketService: ObservableObject {
         }
         return fallback.isEmpty ? agentType.rawValue : fallback
     }
+
+    private func shouldSuppressGenericProcessAgent(agentType: AgentType, command: String, args: String, tty: String) -> Bool {
+        let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedArgs = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if agentType == .claude {
+            if normalizedCommand == ".claude" {
+                return true
+            }
+            if normalizedArgs.contains(".cursor") && (normalizedArgs.contains("claude") || normalizedCommand.contains("claude")) {
+                return true
+            }
+        }
+
+        if agentType == .cursor && tty == "??" && normalizedArgs.isEmpty {
+            return true
+        }
+
+        return false
+    }
 }
 
 private struct CodexProcessSnapshot {
@@ -937,7 +1011,60 @@ private struct MessagePayload: Decodable {
     let permissionRequest: PermissionRequestPayload?
     let agentId: String?
     let request: PermissionRequestPayload?
+    let interactionRequest: InteractionRequestPayload?
     let requestId: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case type
+        case status
+        case terminal
+        case terminalApp
+        case tty
+        case cwd
+        case pid
+        case terminalTitleToken
+        case parentPid
+        case parentCommand
+        case processChain
+        case environmentHints
+        case jetbrainsContext
+        case currentTask
+        case lastUpdate
+        case needsPermission
+        case permissionRequest
+        case agentId
+        case request
+        case requestId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        terminal = try container.decodeIfPresent(String.self, forKey: .terminal)
+        terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp)
+        tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        terminalTitleToken = try container.decodeIfPresent(String.self, forKey: .terminalTitleToken)
+        parentPid = try container.decodeIfPresent(Int.self, forKey: .parentPid)
+        parentCommand = try container.decodeIfPresent(String.self, forKey: .parentCommand)
+        processChain = try container.decodeIfPresent([String].self, forKey: .processChain)
+        environmentHints = try container.decodeIfPresent([String: String].self, forKey: .environmentHints)
+        jetbrainsContext = try container.decodeIfPresent([String: String].self, forKey: .jetbrainsContext)
+        currentTask = try container.decodeIfPresent(String.self, forKey: .currentTask)
+        lastUpdate = try container.decodeIfPresent(Double.self, forKey: .lastUpdate)
+        needsPermission = try container.decodeIfPresent(Bool.self, forKey: .needsPermission)
+        permissionRequest = try container.decodeIfPresent(PermissionRequestPayload.self, forKey: .permissionRequest)
+        agentId = try container.decodeIfPresent(String.self, forKey: .agentId)
+        request = try container.decodeIfPresent(PermissionRequestPayload.self, forKey: .request)
+        interactionRequest = try container.decodeIfPresent(InteractionRequestPayload.self, forKey: .request)
+        requestId = try container.decodeIfPresent(String.self, forKey: .requestId)
+    }
 
     func asAgent() -> Agent? {
         guard
@@ -975,6 +1102,64 @@ private struct MessagePayload: Decodable {
             permissionRequest: permissionRequest?.asPermissionRequest()
         )
     }
+}
+
+private struct InteractionRequestPayload: Decodable {
+    let id: String
+    let kind: String
+    let title: String
+    let message: String?
+    let markdown: String?
+    let options: [InteractionOptionPayload]
+    let textResponse: InteractionTextResponsePayload?
+    let metadata: [String: String?]?
+    let timestamp: Double?
+
+    func asPermissionRequest() -> PermissionRequest? {
+        guard kind == "permission" else { return nil }
+
+        let toolName = metadata?["toolName"] ?? nil
+        let command = metadata?["command"] ?? nil
+        let filePath = metadata?["filePath"] ?? nil
+        let permissionKey = metadata?["permissionKey"] ?? nil
+
+        return PermissionRequest(
+            id: id,
+            type: toolName ?? title.replacingOccurrences(of: "Allow ", with: ""),
+            message: message ?? title,
+            filePath: filePath,
+            command: command,
+            permissionKey: permissionKey,
+            timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
+        )
+    }
+
+    func asInteractivePrompt() -> InteractivePrompt? {
+        guard kind != "permission" else { return nil }
+        return InteractivePrompt(
+            id: id,
+            title: title,
+            message: markdown ?? message,
+            options: options.map { $0.asInteractiveOption() },
+            timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
+        )
+    }
+}
+
+private struct InteractionOptionPayload: Decodable {
+    let id: String
+    let value: String
+    let title: String
+    let detail: String?
+
+    func asInteractiveOption() -> InteractiveOption {
+        InteractiveOption(id: id, value: value, title: title, detail: detail)
+    }
+}
+
+private struct InteractionTextResponsePayload: Decodable {
+    let enabled: Bool
+    let placeholder: String?
 }
 
 private struct PermissionRequestPayload: Decodable {
