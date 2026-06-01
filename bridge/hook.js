@@ -3,6 +3,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { getIntegration } = require('./integrations');
 
 const SOCKET_PATH = '/tmp/notch-monitor.sock';
 const HOOK_LOG_PATH = '/tmp/notch-monitor-hook.log';
@@ -67,33 +68,24 @@ function matcherOf(payload) {
     payload.tool?.name ||
     payload.data?.tool_name ||
     payload.data?.toolName ||
+    payload.data?.tool?.name ||
+    payload.permission?.matcher ||
     payload.permission?.tool_name ||
     payload.permission?.toolName ||
+    payload.permission?.tool?.name ||
     ''
   );
 }
 
 function sessionIdOf(source, payload) {
-  return (
-    payload.session_id ||
-    payload.sessionId ||
-    payload.parent_session_id ||
-    payload.parentSessionId ||
-    process.env.CLAUDE_SESSION_ID ||
-    process.env.CLAUDE_SESSION_NAME ||
-    process.env.CODEX_SESSION_ID ||
-    `${source}:${slug(payload.cwd || process.cwd())}`
-  );
+  const ttyPart = slug(normalizedTTY() || terminalOf() || 'terminal');
+  const fallback = `${source}:${slug(payload.cwd || process.cwd())}:${ttyPart}`;
+  return getIntegration(source).sessionId(source, payload, process.env, fallback);
 }
 
 function sessionNameOf(source, payload) {
-  return (
-    payload.session_name ||
-    payload.sessionName ||
-    process.env.CLAUDE_SESSION_NAME ||
-    payload.cwd && path.basename(payload.cwd) ||
-    `${source}-session`
-  );
+  const fallback = payload.cwd && path.basename(payload.cwd) || `${source}-session`;
+  return getIntegration(source).sessionName(source, payload, process.env, fallback);
 }
 
 function terminalOf() {
@@ -330,10 +322,14 @@ function currentTaskFromPayload(eventName, payload) {
   const toolInput = payload.tool_input || payload.toolInput || payload.input || {};
   const filePath = toolInput.file_path || toolInput.filePath || toolInput.path;
   const command = toolInput.command || toolInput.cmd;
+  const normalizedEvent = String(eventName || '').trim().toLowerCase();
 
   switch (eventName) {
     case 'UserPromptSubmit':
+    case 'BeforeAgent':
       return prompt || 'User prompt submitted';
+    case 'AfterAgent':
+      return payload.prompt_response || payload.promptResponse || payload.message || 'Turn completed';
     case 'PreToolUse':
       return [toolName, filePath || command].filter(Boolean).join(' ');
     case 'PostToolUse':
@@ -347,13 +343,49 @@ function currentTaskFromPayload(eventName, payload) {
     case 'SessionEnd':
       return 'Session ended';
     default:
-      return prompt || toolName || 'Working';
+      break;
+  }
+
+  switch (normalizedEvent) {
+    case 'beforesubmitprompt':
+      return prompt || 'Prompt submitted';
+    case 'beforeshellexecution':
+      return command || payload.command || 'Shell execution';
+    case 'beforemcpexecution':
+      return [payload.server, payload.tool_name || payload.toolName || payload.tool?.name].filter(Boolean).join(' ') || 'MCP execution';
+    case 'beforereadfile':
+      return payload.file_path || payload.filePath || 'Read file';
+    case 'afterfileedit':
+      return payload.file_path || payload.filePath || 'File edited';
+    case 'stop':
+      return payload.message || payload.content || 'Turn completed';
+    default:
+      return prompt || toolName || payload.command || 'Working';
   }
 }
 
 function statusFromEvent(eventName, payload) {
+  const normalizedEvent = String(eventName || '').trim().toLowerCase();
   if (eventName === 'Stop') return 'waiting';
+  if (eventName === 'BeforeAgent') return 'running';
+  if (eventName === 'AfterAgent') return 'completed';
   if (eventName === 'SessionEnd') return 'completed';
+  if (eventName === 'Notification') return 'waiting';
+  if (normalizedEvent === 'stop') {
+    const rawStatus = String(payload.status || '').trim().toLowerCase();
+    if (rawStatus.includes('error') || rawStatus.includes('failed')) return 'error';
+    return 'completed';
+  }
+  if (normalizedEvent === 'notification') return 'waiting';
+  if (
+    normalizedEvent === 'beforesubmitprompt' ||
+    normalizedEvent === 'beforeshellexecution' ||
+    normalizedEvent === 'beforemcpexecution' ||
+    normalizedEvent === 'beforereadfile'
+  ) {
+    return 'running';
+  }
+  if (normalizedEvent === 'afterfileedit') return 'completed';
   if (payload.level === 'error' || payload.error) return 'error';
   return 'running';
 }
@@ -389,8 +421,11 @@ function toolInputOf(payload) {
     payload.input ||
     payload.data?.tool_input ||
     payload.data?.toolInput ||
+    payload.data?.input ||
     payload.permission?.tool_input ||
     payload.permission?.toolInput ||
+    payload.permission?.input ||
+    payload.permission?.tool?.input ||
     payload.tool?.input ||
     {}
   );
@@ -443,28 +478,7 @@ function permissionKey(toolName, payload) {
 }
 
 function permissionOutput(source, eventName, allowed) {
-  if (source === 'codex') {
-    return {
-      continue: Boolean(allowed),
-    };
-  }
-
-  const output = {
-    continue: true,
-    hookSpecificOutput: {
-      hookEventName: eventName,
-      permissionDecision: allowed ? 'allow' : 'deny',
-      permissionDecisionReason: allowed
-        ? 'Approved in NotchMonitor'
-        : 'Denied in NotchMonitor',
-    },
-  };
-
-  if (source !== 'codex') {
-    output.suppressOutput = true;
-  }
-
-  return output;
+  return getIntegration(source).permissionOutput(eventName, allowed);
 }
 
 class BridgeClient {
@@ -582,6 +596,9 @@ async function runEventHook(source) {
   const agentId = `${source}:${sessionId}`;
   const parentInfo = processInfoOf(process.ppid);
   const terminalTitleToken = ttyDevicePath() ? terminalTitleTokenFor(source, process.ppid, sessionId) : null;
+  const resolvedCwd = typeof getIntegration(source).resolvedCwd === 'function'
+    ? getIntegration(source).resolvedCwd(payload, process.cwd())
+    : (payload.cwd || process.cwd());
   const agent = {
     id: agentId,
     name: sessionName,
@@ -591,7 +608,7 @@ async function runEventHook(source) {
     terminalApp: terminalOf(),
     tty: ttyOf(),
     currentTask: currentTaskFromPayload(eventName, payload),
-    cwd: payload.cwd || process.cwd(),
+    cwd: resolvedCwd,
     pid: process.ppid,
     terminalTitleToken,
     parentPid: parentInfo?.ppid || null,
@@ -614,12 +631,6 @@ async function runEventHook(source) {
     await client.connect();
     client.syncAgent(agent);
 
-    if (eventName === 'SessionEnd') {
-      client.unregister();
-      client.close();
-      return;
-    }
-
     if (eventName === 'PreToolUse' && toolNeedsApproval(matcherOf(payload))) {
       const toolName = matcherOf(payload);
       const requestId = `${agentId}:${Date.now()}`;
@@ -635,7 +646,7 @@ async function runEventHook(source) {
 
       const allowed = await client.requestPermission(request);
       process.stdout.write(`${JSON.stringify(permissionOutput(source, eventName, allowed))}\n`);
-    } else if (source === 'qoder' && eventName === 'PreToolUse') {
+    } else if (getIntegration(source).shouldLogUnhandledPreTool(source) && eventName === 'PreToolUse') {
       const toolName = matcherOf(payload);
       log(`qoder pretool observed without approval tool=${toolName || '<unknown>'} keys=${Object.keys(payload).sort().join(',')}`);
     }

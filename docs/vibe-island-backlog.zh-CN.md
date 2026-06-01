@@ -31,6 +31,13 @@
 - `ux`
 - `stability`
 
+状态标记：
+
+- `Done`：本轮已完成并实际验证过核心路径
+- `Partial`：已完成首版或文档/实现的一部分，仍需补强
+- `Todo`：尚未开始
+- `Defer`：当前不建议优先推进
+
 ## Milestone 规划
 
 ### M1：本地能力补强
@@ -90,6 +97,7 @@
 ### Issue 1.1：默认开启稳定 Codex hook 链路
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -110,6 +118,7 @@
 ### Issue 1.2：Codex 主会话与辅助线程去重
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -128,6 +137,13 @@
 ### Issue 1.3：Codex 审批稳定性回归测试
 
 优先级：`P0`
+状态：`Partial`
+
+当前进展：
+
+- 已补充通用 M1 手工测试清单
+- 已新增 Codex 审批专项回归文档
+- 仍缺自动化回归 harness，当前主要依赖手工验证
 
 目标：
 
@@ -152,6 +168,7 @@
 ### Issue 2.1：抽离 integration 层目录结构
 
 优先级：`P0`
+状态：`Partial`
 
 目标：
 
@@ -178,9 +195,18 @@ bridge/integrations/
 - 新 integration 的输入输出协议有 README 或注释说明
 - 后续新增 agent 不需要继续把逻辑堆进 `hook.js`
 
+当前进展：
+
+- 已新增 `bridge/integrations/`
+- `claude / qoder` 已归到 `claude-family`
+- `codex` 已拆到独立 integration
+- `gemini / cursor` 已补首版 integration
+- `opencode` 仍未进入实现，当前只有预研结论
+
 ### Issue 2.2：Gemini CLI 基础接入
 
 优先级：`P0`
+状态：`Partial`
 
 目标：
 
@@ -199,9 +225,17 @@ bridge/integrations/
 - 面板显示 agent 类型和最近任务
 - 不依赖纯进程名猜测作为唯一来源
 
+当前进展：
+
+- 已新增 `~/.gemini/settings.json` hook 安装
+- 已补 `gemini` integration 模块与 fire-and-forget 事件路径
+- `BeforeAgent / AfterAgent / Notification` 已有基础状态映射
+- 仍缺真实 Gemini CLI 实机回归验证
+
 ### Issue 2.3：Cursor Agent 基础接入
 
 优先级：`P0`
+状态：`Partial`
 
 目标：
 
@@ -219,9 +253,18 @@ bridge/integrations/
 - 至少能回跳到 Cursor 或其终端上下文
 - 不与普通 Cursor 编辑器窗口混淆
 
+当前进展：
+
+- 已新增 `~/.cursor/hooks.json` hook 安装
+- 已新增 `cursor` integration 模块
+- 会话 `cwd` 可从 `workspace_roots` 派生
+- `beforeSubmitPrompt / beforeShellExecution / beforeMCPExecution / beforeReadFile / afterFileEdit / stop` 已有首版状态映射
+- 仍缺真实 Cursor Agent 实机回归验证和更细的交互协议适配
+
 ### Issue 2.5：Claude-family agent 接入抽象
 
 优先级：`P0`
+状态：`Partial`
 
 目标：
 
@@ -244,6 +287,7 @@ bridge/integrations/
 ### Issue 2.4：OpenCode 接入预研 Spike
 
 优先级：`P0`
+状态：`Partial`
 
 目标：
 
@@ -263,11 +307,19 @@ bridge/integrations/
   `响应回写方式`
   `失败重连策略`
 
+当前进展：
+
+- 已完成本地参考实现调研
+- 已新增 [`opencode-integration-spike.zh-CN.md`](./opencode-integration-spike.zh-CN.md)
+- 结论已收敛为 `Plugin First`，不是直接走 `SSE + REST`
+- 仍缺本机 OpenCode payload 样本，暂未进入实现
+
 ## Epic 3：Jump 能力扩矩阵
 
 ### Issue 3.1：Ghostty jump 支持
 
 优先级：`P0`
+状态：`Done`
 
 涉及模块：
 
@@ -281,10 +333,12 @@ bridge/integrations/
 ### Issue 3.2：Warp jump 支持
 
 优先级：`P0`
+状态：`Done`
 
 ### Issue 3.2A：VS Code / Cursor workspace-jump 策略收敛
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -304,6 +358,7 @@ bridge/integrations/
 ### Issue 3.2B：iTerm / tmux session-first jump 重构
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -329,6 +384,7 @@ bridge/integrations/
 ### Issue 3.3：VS Code / Cursor terminal jump 支持
 
 优先级：`P0`
+状态：`Partial`
 
 验收标准：
 
@@ -338,6 +394,7 @@ bridge/integrations/
 ### Issue 3.4：Jump 策略层重构
 
 优先级：`P1`
+状态：`Partial`
 
 目标：
 
@@ -353,11 +410,18 @@ bridge/integrations/
 - 新增 terminal 不需要改动大段共享脚本
 - 失败日志统一格式
 
+当前进展：
+
+- `TerminalJumpService` 已新增 `JumpContext`
+- `performJump` 的上下文收集、target 重试和 fallback 已开始拆分
+- 仍未把各 terminal/script builder 彻底拆成独立 strategy 类型
+
 ## Epic 4：稳定性工程
 
 ### Issue 4.1：stale session cleanup
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -376,6 +440,7 @@ bridge/integrations/
 ### Issue 4.2：permission request 排队与并发保护
 
 优先级：`P0`
+状态：`Done`
 
 目标：
 
@@ -395,6 +460,7 @@ bridge/integrations/
 ### Issue 4.3：bootstrap 自愈检查
 
 优先级：`P1`
+状态：`Done`
 
 目标：
 
@@ -418,6 +484,7 @@ bridge/integrations/
 ### Issue 5.1：定义 Plan Review 协议
 
 优先级：`P1`
+状态：`Todo`
 
 目标：
 
@@ -442,6 +509,7 @@ bridge/integrations/
 ### Issue 5.2：Plan Review UI 首版
 
 优先级：`P1`
+状态：`Todo`
 
 涉及模块：
 
@@ -456,6 +524,7 @@ bridge/integrations/
 ### Issue 5.3：Claude / Codex plan 事件适配 Spike
 
 优先级：`P1`
+状态：`Todo`
 
 目标：
 
@@ -471,6 +540,7 @@ bridge/integrations/
 ### Issue 6.1：定义统一 interactive prompt 协议
 
 优先级：`P1`
+状态：`Partial`
 
 目标：
 
@@ -486,9 +556,18 @@ bridge/integrations/
 - 统一支持 title / message / options / metadata
 - response 有 requestId 与 selected option
 
+当前进展：
+
+- 已新增 [`interactive-prompt-protocol.zh-CN.md`](./interactive-prompt-protocol.zh-CN.md)
+- 设计上已收敛为统一 `interaction` 模型，而不是继续分裂成 permission/prompt 两条链路
+- bridge 已开始同时广播 `interaction_requested / interaction_responded` 和旧的 permission 兼容事件
+- Swift 侧已新增对 `interaction_*` 事件的解码与桥接映射
+- Swift 侧模型与 UI 仍未切换到统一 `AgentInteraction` 结构
+
 ### Issue 6.2：Terminal 文本解析降级为 fallback
 
 优先级：`P1`
+状态：`Partial`
 
 涉及模块：
 
@@ -501,11 +580,18 @@ bridge/integrations/
 - 没有协议事件时仍可走旧解析逻辑
 - UI 不需要知道 prompt 来自协议还是 fallback
 
+当前进展：
+
+- SocketService 已开始消费 `interaction_requested`
+- protocol prompt 存在时，terminal 文本解析不会再覆盖它
+- 仍未完成统一 `AgentInteraction` 模型和 UI 无差别渲染
+
 ## Epic 7：OpenCode 原生集成
 
 ### Issue 7.1：OpenCode SSE client
 
 优先级：`P1`
+状态：`Todo`
 
 涉及模块：
 

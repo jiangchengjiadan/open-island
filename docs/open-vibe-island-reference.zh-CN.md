@@ -139,6 +139,24 @@ open-vibe-island README 提到：
 - OpenCode：JS plugin integration
 - Codex Desktop：JSON-RPC + deep link `codex://threads/<id>`
 
+进一步看它的开源实现，OpenCode 这条链路已经体现出几个很具体的设计点：
+
+- 插件安装目录：`~/.config/opencode/plugins/`
+- 配置注册文件：`~/.config/opencode/config.json`
+- 事件模型：
+  - `SessionStart`
+  - `SessionEnd`
+  - `UserPromptSubmit`
+  - `PreToolUse`
+  - `PostToolUse`
+  - `PermissionRequest`
+  - `QuestionAsked`
+  - `Stop`
+- stdout directive：
+  - `{"type":"allow"}`
+  - `{"type":"deny","reason":"..."}`
+  - `{"type":"answer","text":"..."}`
+
 这说明它没有把所有 agent 都往统一 hook 协议里硬塞，而是接受：
 
 - 有些 agent 适合 hook

@@ -15,24 +15,36 @@ enum TerminalJumpService {
     }
 
     private static func performJump(to agent: Agent) {
-        let descriptor = AppDescriptor.resolve(for: agent)
-        let ttyCandidates = normalizedTTYCandidates(from: agent.tty ?? agent.terminal)
-        let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let terminalHint = (agent.terminalApp ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let terminalTitleToken = agent.terminalTitleToken?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let iTermSessionTokens = iTermSessionTokens(from: agent)
-        let tmuxTarget = agent.environmentHints?["TMUX_TARGET"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tmuxSocketPath = agent.environmentHints?["TMUX_SOCKET_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = JumpContext(agent: agent)
 
-        log("jump requested agent=\(agent.name) terminalHint=\(terminalHint) titleToken=\(terminalTitleToken ?? "") app=\(descriptor.debugName) bundle=\(descriptor.bundleIdentifier ?? "") tty=\(ttyCandidates.joined(separator: ",")) cwd=\(cwd ?? "") iTermSession=\(iTermSessionTokens.joined(separator: ",")) tmuxTarget=\(tmuxTarget ?? "") pid=\(agent.pid.map(String.init) ?? "")")
+        log("jump requested agent=\(agent.name) terminalHint=\(context.terminalHint) titleToken=\(context.terminalTitleToken ?? "") app=\(context.descriptor.debugName) bundle=\(context.descriptor.bundleIdentifier ?? "") tty=\(context.ttyCandidates.joined(separator: ",")) cwd=\(context.cwd ?? "") iTermSession=\(context.iTermSessionTokens.joined(separator: ",")) tmuxTarget=\(context.tmuxTarget ?? "") pid=\(agent.pid.map(String.init) ?? "")")
 
-        let tmuxPaneSelected = jumpToTmuxPane(tmuxTarget: tmuxTarget, tmuxSocketPath: tmuxSocketPath, ttyCandidates: ttyCandidates)
+        let tmuxPaneSelected = jumpToTmuxPane(tmuxTarget: context.tmuxTarget, tmuxSocketPath: context.tmuxSocketPath, ttyCandidates: context.ttyCandidates)
         if tmuxPaneSelected {
-            log("tmux pane selected target=\(tmuxTarget ?? "")")
+            log("tmux pane selected target=\(context.tmuxTarget ?? "")")
         }
 
+        if attemptPreferredTargets(using: context) {
+            return
+        }
+
+        if tmuxPaneSelected {
+            activateBestEffort(for: context.descriptor)
+            log("jump completed via tmux pane selection with app activation for app=\(context.descriptor.debugName)")
+            return
+        }
+
+        if context.ttyCandidates.isEmpty || context.descriptor.requiresActivationFallback {
+            activateBestEffort(for: context.descriptor)
+            log("jump fell back to app activation for app=\(context.descriptor.debugName)")
+        } else {
+            log("jump aborted without activation because no exact target matched after retries")
+        }
+    }
+
+    private static func attemptPreferredTargets(using context: JumpContext) -> Bool {
         for attempt in 1...3 {
-            activatePreferredApplication(for: descriptor)
+            activatePreferredApplication(for: context.descriptor)
 
             if attempt > 1 {
                 usleep(100_000)
@@ -40,28 +52,17 @@ enum TerminalJumpService {
                 usleep(35_000)
             }
 
-            for target in descriptor.preferredTargets {
-                if jump(to: target, ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor) {
+            for target in context.descriptor.preferredTargets {
+                if jump(to: target, context: context) {
                     log("jump succeeded target=\(target.rawValue) attempt=\(attempt)")
-                    return
+                    return true
                 }
             }
 
-            log("jump retry scheduled attempt=\(attempt) app=\(descriptor.debugName)")
+            log("jump retry scheduled attempt=\(attempt) app=\(context.descriptor.debugName)")
         }
 
-        if tmuxPaneSelected {
-            activateBestEffort(for: descriptor)
-            log("jump completed via tmux pane selection with app activation for app=\(descriptor.debugName)")
-            return
-        }
-
-        if ttyCandidates.isEmpty || descriptor.requiresActivationFallback {
-            activateBestEffort(for: descriptor)
-            log("jump fell back to app activation for app=\(descriptor.debugName)")
-        } else {
-            log("jump aborted without activation because no exact target matched after retries")
-        }
+        return false
     }
 
     private static func activatePreferredApplication(for descriptor: AppDescriptor) {
@@ -105,13 +106,19 @@ enum TerminalJumpService {
         return tokens
     }
 
-    private static func jump(to target: JumpTarget, ttyCandidates: [String], iTermSessionTokens: [String], terminalTitleToken: String?, cwd: String?, descriptor: AppDescriptor) -> Bool {
+    private static func jump(to target: JumpTarget, context: JumpContext) -> Bool {
         if target == .editorIDE,
-           jumpToEditorWorkspace(cwd: cwd, descriptor: descriptor) {
+           jumpToEditorWorkspace(cwd: context.cwd, descriptor: context.descriptor) {
             return true
         }
 
-        let script = target.script(ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd, descriptor: descriptor)
+        let script = target.script(
+            ttyCandidates: context.ttyCandidates,
+            iTermSessionTokens: context.iTermSessionTokens,
+            terminalTitleToken: context.terminalTitleToken,
+            cwd: context.cwd,
+            descriptor: context.descriptor
+        )
         let result = run(script: script, target: target.rawValue)
         return result == "ok"
     }
@@ -267,11 +274,30 @@ enum TerminalJumpService {
 
     private static func editorCLIPath(for descriptor: AppDescriptor) -> String? {
         let executableName: String
+        let candidates: [String]
         switch descriptor.kind {
         case .vscode:
             executableName = "code"
+            candidates = [
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+                "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+                "\(NSHomeDirectory())/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+                "\(NSHomeDirectory())/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+                "/opt/homebrew/bin/code",
+                "/usr/local/bin/code",
+                "/usr/bin/code",
+                "\(NSHomeDirectory())/.local/bin/code",
+            ]
         case .cursor:
             executableName = "cursor"
+            candidates = [
+                "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+                "\(NSHomeDirectory())/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+                "/opt/homebrew/bin/cursor",
+                "/usr/local/bin/cursor",
+                "/usr/bin/cursor",
+                "\(NSHomeDirectory())/.local/bin/cursor",
+            ]
         default:
             return nil
         }
@@ -287,19 +313,6 @@ enum TerminalJumpService {
                 return bundleCLI
             }
         }
-
-        let candidates = [
-            "/opt/homebrew/bin/\(executableName)",
-            "/usr/local/bin/\(executableName)",
-            "/usr/bin/\(executableName)",
-            "\(NSHomeDirectory())/.local/bin/\(executableName)",
-            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-            "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-            "\(NSHomeDirectory())/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-            "\(NSHomeDirectory())/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
-            "\(NSHomeDirectory())/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-        ]
 
         if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             return found
@@ -398,6 +411,8 @@ enum TerminalJumpService {
             return "dev.warp.Warp-Stable"
         case "Visual Studio Code":
             return "com.microsoft.VSCode"
+        case "Cursor":
+            return "com.todesktop.230313mzl4w4u92"
         case "Terminal":
             return "com.apple.Terminal"
         default:
@@ -477,6 +492,28 @@ enum TerminalJumpService {
             } else {
                 try? data.write(to: logURL)
             }
+        }
+    }
+
+    private struct JumpContext {
+        let descriptor: AppDescriptor
+        let ttyCandidates: [String]
+        let cwd: String?
+        let terminalHint: String
+        let terminalTitleToken: String?
+        let iTermSessionTokens: [String]
+        let tmuxTarget: String?
+        let tmuxSocketPath: String?
+
+        init(agent: Agent) {
+            descriptor = AppDescriptor.resolve(for: agent)
+            ttyCandidates = normalizedTTYCandidates(from: agent.tty ?? agent.terminal)
+            cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+            terminalHint = (agent.terminalApp ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            terminalTitleToken = agent.terminalTitleToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+            iTermSessionTokens = TerminalJumpService.iTermSessionTokens(from: agent)
+            tmuxTarget = agent.environmentHints?["TMUX_TARGET"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            tmuxSocketPath = agent.environmentHints?["TMUX_SOCKET_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -671,7 +708,7 @@ enum TerminalJumpService {
                 return AppDescriptor(kind: .vscode, localizedName: "Visual Studio Code", bundleIdentifier: "com.microsoft.VSCode")
             }
             if lowercased.contains("cursor") {
-                return AppDescriptor(kind: .cursor, localizedName: "Cursor", bundleIdentifier: nil)
+                return AppDescriptor(kind: .cursor, localizedName: "Cursor", bundleIdentifier: "com.todesktop.230313mzl4w4u92")
             }
             if lowercased.contains("terminal") {
                 return AppDescriptor(kind: .terminal, localizedName: "Terminal", bundleIdentifier: "com.apple.Terminal")
@@ -749,7 +786,7 @@ private enum JumpTarget: String {
     func script(ttyCandidates: [String], iTermSessionTokens: [String], terminalTitleToken: String?, cwd: String?, descriptor: TerminalJumpService.AppDescriptor) -> String {
         switch self {
         case .terminalApp:
-            return terminalScript(ttyCandidates: ttyCandidates, cwd: cwd)
+            return terminalScript(ttyCandidates: ttyCandidates, terminalTitleToken: terminalTitleToken, cwd: cwd)
         case .iTerm:
             return iTermScript(ttyCandidates: ttyCandidates, iTermSessionTokens: iTermSessionTokens, terminalTitleToken: terminalTitleToken, cwd: cwd)
         case .ghostty:
@@ -763,75 +800,60 @@ private enum JumpTarget: String {
         }
     }
 
-    private func terminalScript(ttyCandidates: [String], cwd: String?) -> String {
-        let ttyList = appleScriptList(ttyCandidates)
-        let escapedCwd = appleScriptString(cwd ?? "")
+    private func terminalScript(ttyCandidates: [String], terminalTitleToken: String?, cwd: String?) -> String {
+        let ttyTitleTokens = ttyCandidates
+            .map { $0.replacingOccurrences(of: "/dev/", with: "") }
+            .filter { !$0.isEmpty }
+        let ttyList = appleScriptList(ttyTitleTokens)
+        let escapedTitleToken = appleScriptString(terminalTitleToken ?? "")
+        let cwdToken = cwd.flatMap { URL(fileURLWithPath: $0).lastPathComponent }
+        let escapedCwdToken = appleScriptString(cwdToken ?? "")
         return """
-        set targetWindowName to ""
-        set targetTabIndex to -1
-        tell application "Terminal"
-            activate
-            repeat with targetTTY in \(ttyList)
-                set targetTTYValue to targetTTY
-                repeat with theWindow in windows
-                    set windowRef to contents of theWindow
-                    repeat with tabIndex from 1 to count of tabs of windowRef
-                        try
-                            set tabRef to tab tabIndex of windowRef
-                            set tabTTY to tty of tabRef
-                            set normalizedTTY to tabTTY
-                            if normalizedTTY starts with "/dev/" then
-                                set normalizedTTY to text 6 thru -1 of normalizedTTY
-                            end if
-                            if tabTTY is targetTTYValue or normalizedTTY is targetTTYValue then
-                                set targetWindowName to name of windowRef
-                                set targetTabIndex to tabIndex
-                                exit repeat
-                            end if
-                        end try
-                    end repeat
-                    if targetWindowName is not "" then exit repeat
-                end repeat
-                if targetWindowName is not "" then exit repeat
-            end repeat
-
-            if targetWindowName is "" and \(escapedCwd) is not "" then
-                repeat with theWindow in windows
-                    set windowRef to contents of theWindow
+        tell application "Terminal" to activate
+        tell application "System Events"
+            tell process "Terminal"
+                set frontmost to true
+                repeat with uiWindow in windows
                     try
-                        if name of windowRef contains \(escapedCwd) then
-                            set targetWindowName to name of windowRef
-                            set targetTabIndex to index of selected tab of windowRef
-                            exit repeat
-                        end if
-                    end try
-                end repeat
-            end if
-
-            if targetWindowName is not "" and targetTabIndex is not -1 then
-                repeat with theWindow in windows
-                    set windowRef to contents of theWindow
-                    if name of windowRef is targetWindowName then
-                        set selected tab of windowRef to tab targetTabIndex of windowRef
-                        exit repeat
-                    end if
-                end repeat
-            end if
-        end tell
-
-        if targetWindowName is not "" then
-            tell application "System Events"
-                tell process "Terminal"
-                    set frontmost to true
-                    repeat with uiWindow in windows
-                        if name of uiWindow is targetWindowName then
+                        set windowName to name of uiWindow
+                        if \(escapedTitleToken) is not "" and windowName contains \(escapedTitleToken) then
                             perform action "AXRaise" of uiWindow
                             return "ok"
                         end if
+                    end try
+                end repeat
+
+                repeat with targetTTY in \(ttyList)
+                    set targetTTYValue to targetTTY
+                    repeat with uiWindow in windows
+                        try
+                            set windowName to name of uiWindow
+                            if windowName contains targetTTYValue then
+                                perform action "AXRaise" of uiWindow
+                                return "ok"
+                            end if
+                        end try
                     end repeat
-                end tell
+                end repeat
+
+                if \(escapedCwdToken) is not "" then
+                    repeat with uiWindow in windows
+                        try
+                            set windowName to name of uiWindow
+                            if windowName contains \(escapedCwdToken) then
+                                perform action "AXRaise" of uiWindow
+                                return "ok"
+                            end if
+                        end try
+                    end repeat
+                end if
+
+                if (count of windows) is 1 then
+                    perform action "AXRaise" of window 1
+                    return "ok"
+                end if
             end tell
-        end if
+        end tell
         return "miss"
         """
     }

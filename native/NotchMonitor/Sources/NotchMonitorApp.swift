@@ -45,6 +45,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 自动安装 hooks / wrapper 并启动内置 bridge
         AppBootstrapService.shared.startIfNeeded()
+        UsageStore.shared.startAutoRefresh()
 
         // 等 bridge 起稳后再接 socket，避免 DMG 首启时 process fallback 和 socket 注册打架
         scheduleSocketStartup()
@@ -99,6 +100,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func cleanup() {
         AppBootstrapService.shared.stop()
+        Task { @MainActor in
+            UsageStore.shared.stopAutoRefresh()
+        }
         permissionAttentionObserver?.cancel()
         permissionAttentionObserver = nil
         bootstrapObserver?.cancel()
@@ -276,9 +280,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 检查鼠标是否在触发区域
         if triggerRect.contains(mouseLocation) {
             panel.cancelScheduledCollapse()
-            if !panel.isExpanded {
-                print("鼠标进入触发区域，展开面板")
-                panel.expand()
+            if !panel.isExpanded && !panel.isPeeking {
+                print("鼠标进入触发区域，显示预览岛")
+                panel.enterPeek()
             }
         } else if panel.isExpanded {
             let keepRect = panel.hoverKeepRect(for: screen)
@@ -287,6 +291,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 panel.cancelScheduledCollapse()
             } else {
                 panel.scheduleCollapse()
+            }
+        } else if panel.isPeeking {
+            if panel.hoverKeepRect(for: screen).contains(mouseLocation) {
+                panel.cancelScheduledCollapse()
+            } else {
+                panel.exitPeek()
             }
         }
     }
@@ -299,6 +309,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Clickable Notch View
 class ClickableNotchView: NSView {
     var onClicked: (() -> Void)?
+    var fillColor = NSColor.black
+    var strokeColor = NSColor.white.withAlphaComponent(0.06)
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let radius: CGFloat = 14
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath()
+
+        path.move(to: NSPoint(x: rect.minX, y: rect.maxY))
+        path.line(to: NSPoint(x: rect.maxX, y: rect.maxY))
+        path.line(to: NSPoint(x: rect.maxX, y: rect.minY + radius))
+        path.curve(
+            to: NSPoint(x: rect.maxX - radius, y: rect.minY),
+            controlPoint1: NSPoint(x: rect.maxX, y: rect.minY + radius * 0.45),
+            controlPoint2: NSPoint(x: rect.maxX - radius * 0.45, y: rect.minY)
+        )
+        path.line(to: NSPoint(x: rect.minX + radius, y: rect.minY))
+        path.curve(
+            to: NSPoint(x: rect.minX, y: rect.minY + radius),
+            controlPoint1: NSPoint(x: rect.minX + radius * 0.45, y: rect.minY),
+            controlPoint2: NSPoint(x: rect.minX, y: rect.minY + radius * 0.45)
+        )
+        path.line(to: NSPoint(x: rect.minX, y: rect.maxY))
+        path.close()
+
+        fillColor.setFill()
+        path.fill()
+        strokeColor.setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+    }
 
     override func mouseDown(with event: NSEvent) {
         print("ClickableNotchView 被点击")
@@ -307,6 +350,47 @@ class ClickableNotchView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
+    }
+}
+
+private struct OpenIslandNotchInfo {
+    let width: CGFloat
+    let height: CGFloat
+    let hasNotch: Bool
+
+    static func detect(from screen: NSScreen?) -> OpenIslandNotchInfo {
+        guard let screen else {
+            return OpenIslandNotchInfo(width: 150, height: menuBarFallback(), hasNotch: false)
+        }
+
+        let visualHeight = visibleMenuBarHeight(of: screen)
+        let safeTop = screen.safeAreaInsets.top
+        if safeTop > 0 {
+            let leftWidth = screen.auxiliaryTopLeftArea?.width ?? 0
+            let rightWidth = screen.auxiliaryTopRightArea?.width ?? 0
+            let width = (leftWidth > 0 && rightWidth > 0)
+                ? screen.frame.width - leftWidth - rightWidth
+                : 150
+            return OpenIslandNotchInfo(width: width, height: visualHeight, hasNotch: true)
+        }
+
+        return OpenIslandNotchInfo(width: 150, height: visualHeight, hasNotch: false)
+    }
+
+    private static func visibleMenuBarHeight(of screen: NSScreen) -> CGFloat {
+        let fromVisibleFrame = screen.frame.maxY - screen.visibleFrame.maxY
+        if fromVisibleFrame > 0 {
+            return fromVisibleFrame
+        }
+        if screen.safeAreaInsets.top > 0 {
+            return screen.safeAreaInsets.top
+        }
+        return menuBarFallback()
+    }
+
+    private static func menuBarFallback() -> CGFloat {
+        let thickness = NSStatusBar.system.thickness
+        return thickness > 0 ? thickness : 24
     }
 }
 
@@ -357,11 +441,20 @@ class SetupGuideWindow: NSPanel {
 
 // MARK: - Notch Panel Window
 class NotchPanelWindow: NSPanel {
-    private(set) var isExpanded = false
+    private enum PanelState {
+        case compact
+        case peek
+        case expanded
+    }
+
+    private var panelState: PanelState = .compact
+    var isExpanded: Bool { panelState == .expanded }
+    var isPeeking: Bool { panelState == .peek }
     private(set) var isAnimating = false
     private var notchView: NSView?
     private var collapseTimer: Timer?
     private var hoverCheckTimer: Timer?
+    private var screenChangeObserver: NSObjectProtocol?
     private var panelHostingController: NSViewController?
     private var agentCountLabel: NSTextField?
     private var collapsedTitleLabel: NSTextField?
@@ -370,14 +463,29 @@ class NotchPanelWindow: NSPanel {
     private var agentsObserver: AnyCancellable?
 
     // 尺寸配置
-    private let collapsedSize = NSSize(width: 226, height: 40)
     private let expandedWidth: CGFloat = 520
     private let topInset: CGFloat = 0
+
+    private var collapsedSize: NSSize {
+        Self.collapsedSizeForCurrentScreen()
+    }
+
+    private var peekSize: NSSize {
+        let compact = collapsedSize
+        return NSSize(
+            width: min(expandedWidth - 72, max(compact.width + 136, 340)),
+            height: compact.height
+        )
+    }
+
+    private var shellSize: NSSize {
+        panelState == .peek ? peekSize : collapsedSize
+    }
 
     init() {
         // 初始化为收起状态
         super.init(
-            contentRect: NSRect(origin: .zero, size: collapsedSize),
+            contentRect: NSRect(origin: .zero, size: Self.collapsedSizeForCurrentScreen()),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -395,24 +503,23 @@ class NotchPanelWindow: NSPanel {
 
         // 定位到刘海处
         positionWindow()
+        observeScreenChanges()
     }
 
     private func setupNotchView() {
         // 创建可点击的灵动岛容器
-        let notchContainer = ClickableNotchView(frame: NSRect(origin: .zero, size: collapsedSize))
+        let size = shellSize
+        let notchContainer = ClickableNotchView(frame: NSRect(origin: .zero, size: size))
+        notchContainer.fillColor = NSColor.black.withAlphaComponent(0.98)
+        notchContainer.strokeColor = NSColor.white.withAlphaComponent(0.06)
         notchContainer.wantsLayer = true
-        notchContainer.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.98).cgColor
-        notchContainer.layer?.cornerRadius = 18
-        notchContainer.layer?.masksToBounds = true
+        notchContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        notchContainer.layer?.masksToBounds = false
         notchContainer.onClicked = { [weak self] in
             self?.expand()
         }
 
-        // 添加边框
-        notchContainer.layer?.borderWidth = 0.5
-        notchContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.06).cgColor
-
-        let statusGlow = NSView(frame: NSRect(x: 18, y: 12, width: 18, height: 18))
+        let statusGlow = NSView(frame: NSRect(x: 18, y: (size.height - 18) / 2, width: 18, height: 18))
         statusGlow.wantsLayer = true
         statusGlow.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.28).cgColor
         statusGlow.layer?.cornerRadius = 9
@@ -423,7 +530,7 @@ class NotchPanelWindow: NSPanel {
         notchContainer.addSubview(statusGlow)
         self.collapsedStatusGlow = statusGlow
 
-        let statusLight = NSView(frame: NSRect(x: 22, y: 16, width: 10, height: 10))
+        let statusLight = NSView(frame: NSRect(x: 22, y: (size.height - 10) / 2, width: 10, height: 10))
         statusLight.wantsLayer = true
         statusLight.layer?.backgroundColor = NSColor.systemGreen.cgColor
         statusLight.layer?.cornerRadius = 5
@@ -476,16 +583,42 @@ class NotchPanelWindow: NSPanel {
     }
 
     func positionWindow() {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = Self.targetScreen() else { return }
 
         let screenFrame = screen.frame
-        let size = isExpanded ? expandedSize : collapsedSize
+        let size = isExpanded ? expandedSize : shellSize
 
         // 计算刘海区域位置（居中）
         let x = screenFrame.midX - size.width / 2
         let y = screenFrame.maxY - size.height - topInset
 
         self.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func observeScreenChanges() {
+        guard screenChangeObserver == nil else { return }
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleScreenChange()
+        }
+    }
+
+    private func handleScreenChange() {
+        if isExpanded {
+            refreshExpandedLayoutIfNeeded()
+            positionWindow()
+            return
+        }
+
+        let size = shellSize
+        contentMinSize = size
+        contentMaxSize = size
+        setContentSize(size)
+        setupNotchView()
+        positionWindow()
     }
 
     func hoverKeepRect(for screen: NSScreen? = NSScreen.main) -> NSRect {
@@ -510,7 +643,7 @@ class NotchPanelWindow: NSPanel {
         guard !isExpanded, !isAnimating else { return }
         cancelScheduledCollapse()
         isAnimating = true
-        isExpanded = true
+        panelState = .expanded
         let expandedSize = currentExpandedSize()
 
         // 创建展开后的内容视图
@@ -557,7 +690,7 @@ class NotchPanelWindow: NSPanel {
         cancelScheduledCollapse()
         stopHoverChecking()
         isAnimating = true
-        isExpanded = false
+        panelState = .compact
 
         let targetFrame = anchoredFrame(for: collapsedSize)
         NSAnimationContext.runAnimationGroup { context in
@@ -597,6 +730,59 @@ class NotchPanelWindow: NSPanel {
         collapseTimer = nil
     }
 
+    func enterPeek() {
+        guard panelState == .compact, !isAnimating else { return }
+        cancelScheduledCollapse()
+        panelState = .peek
+        isAnimating = true
+
+        let targetSize = peekSize
+        contentMinSize = targetSize
+        contentMaxSize = targetSize
+        setContentSize(targetSize)
+        setupNotchView()
+
+        let targetFrame = anchoredFrame(for: targetSize)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.10
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+            context.allowsImplicitAnimation = true
+
+            self.animator().setFrame(targetFrame, display: true)
+            self.alphaValue = 1
+        } completionHandler: {
+            self.isAnimating = false
+            print("预览岛显示完成")
+        }
+
+        orderFrontRegardless()
+    }
+
+    func exitPeek() {
+        guard panelState == .peek, !isAnimating else { return }
+        cancelScheduledCollapse()
+        panelState = .compact
+        isAnimating = true
+
+        let targetSize = collapsedSize
+        contentMinSize = targetSize
+        contentMaxSize = targetSize
+        setContentSize(targetSize)
+        setupNotchView()
+
+        let targetFrame = anchoredFrame(for: targetSize)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.10
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.2, 1.0)
+            context.allowsImplicitAnimation = true
+
+            self.animator().setFrame(targetFrame, display: true)
+        } completionHandler: {
+            self.isAnimating = false
+            print("预览岛收起完成")
+        }
+    }
+
     func startHoverChecking() {
         hoverCheckTimer?.invalidate()
         hoverCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
@@ -628,7 +814,7 @@ class NotchPanelWindow: NSPanel {
     }
 
     private func anchoredFrame(for size: NSSize) -> NSRect {
-        guard let screen = NSScreen.main else {
+        guard let screen = Self.targetScreen() else {
             return NSRect(origin: frame.origin, size: size)
         }
 
@@ -729,7 +915,7 @@ class NotchPanelWindow: NSPanel {
             let issueCount = AppBootstrapService.shared.checks.filter { $0.state != .ready }.count
             let height: CGFloat
             if issueCount == 0 {
-                height = 132
+                height = 286
             } else {
                 height = min(286, CGFloat(112 + (min(issueCount, 4) * 42)))
             }
@@ -740,7 +926,7 @@ class NotchPanelWindow: NSPanel {
         let rowsHeight = visibleAgents.reduce(CGFloat(0)) { total, agent in
             total + expandedRowHeight(for: agent)
         }
-        let height = 16 + rowsHeight
+        let height = max(286, 16 + rowsHeight)
         return NSSize(width: expandedWidth, height: height)
     }
 
@@ -751,9 +937,23 @@ class NotchPanelWindow: NSPanel {
         return 54
     }
 
+    private static func targetScreen() -> NSScreen? {
+        NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main
+    }
+
+    private static func collapsedSizeForCurrentScreen() -> NSSize {
+        let notch = OpenIslandNotchInfo.detect(from: targetScreen())
+        let width = max(226, notch.width + 76)
+        let height = max(32, notch.height)
+        return NSSize(width: width, height: height)
+    }
+
     deinit {
         collapseTimer?.invalidate()
         hoverCheckTimer?.invalidate()
+        if let screenChangeObserver {
+            NotificationCenter.default.removeObserver(screenChangeObserver)
+        }
         agentsObserver?.cancel()
     }
 }

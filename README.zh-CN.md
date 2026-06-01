@@ -14,10 +14,12 @@ Open Island 是一个 macOS 菜单栏应用，适合同时运行多个本地编�
 
 ## 特性
 
-- 实时显示 Claude Code、Codex 和 Qoder CLI 的会话状态
+- 实时显示 Claude Code、Codex、Cursor、Gemini CLI 和 Qoder CLI 的会话状态
 - 在面板中展示支持的权限请求
 - 一键跳回对应的终端或 IDE
 - 支持 iTerm/tmux 的会话级跳转，以及 VS Code/Cursor 的 workspace 级跳转
+- 接近真实刘海的 compact / peek / expanded 三态面板
+- Claude 和 Codex usage 页面，展示 5 小时与每周用量窗口
 - 轻量本地 macOS 应用，配合小型 bridge 进程运行
 
 ## 展示
@@ -64,6 +66,8 @@ CLI 编码 Agent 很强，但一旦你同时开着 Terminal、iTerm、Claude Cod
 
 - Claude Code
 - Codex
+- Cursor
+- Gemini CLI
 - Qoder CLI
 
 当前跳转覆盖：
@@ -76,7 +80,7 @@ CLI 编码 Agent 很强，但一旦你同时开着 Terminal、iTerm、Claude Cod
 - Cursor
 - JetBrains IDE
 
-代码结构已经为后续接入更多本地 Agent 留了空间，但目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex 和 Qoder。
+代码结构已经为后续接入更多本地 Agent 留了空间，但目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex、Cursor 和 Qoder。
 
 ## 状态
 
@@ -86,10 +90,13 @@ Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal�
 
 - 个人和本地开发者工作流
 - bridge、面板渲染和支持的权限流程
+- compact / peek / expanded 三态 notch 面板交互
 - Terminal 和 iTerm 的跳转体验
 - VS Code 和 Cursor 的 workspace 跳转
 - Codex 默认 hooks 安装和会话去重
+- Gemini CLI 会话监控
 - Qoder 会话监控
+- Claude/Codex usage 展示、刷新和 Claude re-auth 支持
 
 当前已知粗糙点：
 
@@ -102,6 +109,7 @@ Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal�
 
 - 继续改进 JetBrains 路由，减少多窗口误跳
 - 提高权限交互和跳转行为的稳定性
+- 增加基于 Claude/Codex 本地日志的 token/cost 统计
 - 补更多测试和打包完善工作
 
 ## 环境要求
@@ -121,7 +129,7 @@ Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal�
 ./scripts/install-hooks.sh
 ```
 
-这一步会安装 Claude、Qoder、Codex 的 hooks，以及 Codex wrapper 和 `open-island` 启动器。
+这一步会安装 Claude、Cursor、Gemini、Qoder、Codex 的 hooks，以及 Codex wrapper 和 `open-island` 启动器。
 
 然后使用：
 
@@ -176,10 +184,11 @@ Open Island 依赖 macOS Accessibility 来完成窗口激活、终端跳转和�
 ## 使用方式
 
 1. 用 `open-island start` 启动 Open Island
-2. 正常启动 Claude Code、Codex 或 Qoder
+2. 正常启动 Claude Code、Codex、Cursor、Gemini CLI 或 Qoder
 3. 观察 notch panel 中实时出现的会话
 4. 点击某个会话，跳回它所属的终端或 IDE
 5. 在面板中查看和处理支持的权限请求
+6. 切到 `Usage` 页查看 Claude 和 Codex 的 5 小时 / 每周用量窗口
 
 ## 最近完成
 
@@ -190,7 +199,12 @@ Open Island 依赖 macOS Accessibility 来完成窗口激活、终端跳转和�
 - bootstrap 诊断可尝试有限自愈
 - iTerm/tmux 跳转向 session-first 重构
 - VS Code/Cursor 跳转优先走 editor CLI 的 workspace reopen
+- 已新增 Cursor hooks 和基于 workspace 的会话识别
+- 新增 Gemini CLI hooks 和会话监控
 - 新增 Qoder hooks 和会话监控
+- notch panel 已改为 compact、hover peek、expanded 三态
+- 新增参考 CodexIsland 视觉的 Claude/Codex usage 页面
+- Claude usage 支持过期 OAuth token 刷新，并在 scope 不足时提供 re-auth 入口
 
 ## 项目结构
 

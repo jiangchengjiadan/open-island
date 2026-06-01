@@ -14,10 +14,12 @@ Open Island is a macOS menu bar app for people who run multiple local coding age
 
 ## Highlights
 
-- Live session status for Claude Code, Codex, and Qoder CLI
+- Live session status for Claude Code, Codex, Cursor, Gemini CLI, and Qoder CLI
 - Permission prompts surfaced in the panel for supported hook events
 - One-click jump back to the owning terminal or IDE
 - Session-aware jump behavior for iTerm/tmux and workspace-level jump for VS Code/Cursor
+- Notch-inspired compact, peek, and expanded panel states
+- Claude and Codex usage view with 5-hour and weekly limit windows
 - Lightweight local macOS app with a small bridge process
 
 ## Showcase
@@ -64,6 +66,8 @@ Primary support today:
 
 - Claude Code
 - Codex
+- Cursor
+- Gemini CLI
 - Qoder CLI
 
 Current jump coverage:
@@ -76,7 +80,7 @@ Current jump coverage:
 - Cursor
 - JetBrains IDEs
 
-The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code, Codex, and Qoder on local macOS workflows.
+The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code, Codex, Cursor, and Qoder on local macOS workflows.
 
 ## Status
 
@@ -86,10 +90,13 @@ What works well today:
 
 - personal and local developer workflows
 - bridge, panel rendering, and supported permission flows
+- compact/peek/expanded notch panel interactions
 - terminal and iTerm jump behavior
 - VS Code and Cursor workspace jump
 - Codex default hook install and session de-duplication
+- Gemini CLI session monitoring
 - Qoder session monitoring
+- Claude/Codex usage display with refresh and Claude re-auth support
 
 Current rough edges:
 
@@ -102,6 +109,7 @@ Near-term focus:
 
 - improve JetBrains routing and reduce multi-window misses
 - harden permission and jump behavior
+- add local token/cost summaries from Claude and Codex logs
 - add more tests and packaging polish
 
 ## Requirements
@@ -121,7 +129,7 @@ Install the launcher and local hooks:
 ./scripts/install-hooks.sh
 ```
 
-This installs Claude, Qoder, and Codex hooks, the Codex wrapper, and the `open-island` launcher.
+This installs Claude, Cursor, Gemini, Qoder, and Codex hooks, the Codex wrapper, and the `open-island` launcher.
 
 Then use:
 
@@ -176,10 +184,11 @@ Without this permission, the panel may still render, but jump and automation beh
 ## Usage
 
 1. Start Open Island with `open-island start`
-2. Launch Claude Code, Codex, or Qoder normally
+2. Launch Claude Code, Codex, Cursor, Gemini CLI, or Qoder normally
 3. Watch live sessions appear in the notch panel
 4. Click a session to jump back to its terminal or IDE
 5. Use the panel to review supported permission prompts
+6. Switch to the `Usage` tab to inspect Claude and Codex 5-hour / weekly usage windows
 
 ## Recent Work
 
@@ -190,7 +199,12 @@ Without this permission, the panel may still render, but jump and automation beh
 - bootstrap diagnostics can now attempt limited self-heal
 - iTerm/tmux jump was reworked toward session-first behavior
 - VS Code/Cursor jump now prefers workspace reopen via the editor CLI
+- Cursor hooks and workspace-derived session identity were added
+- Gemini CLI hooks and session monitoring were added
 - Qoder hooks and session monitoring were added
+- The notch panel now uses compact, hover peek, and expanded states
+- Added a CodexIsland-inspired Claude/Codex usage page with ring charts
+- Claude usage can refresh expired OAuth tokens and offer re-auth when the usage endpoint requires a new login scope
 
 ## Project Structure
 

@@ -198,6 +198,10 @@ class NotchMonitorServer {
             agent.needsPermission = false;
             agent.permissionRequest = null;
         }
+        this.broadcast({
+            type: 'interaction_responded',
+            data: buildPermissionInteractionResponse(data, permissionKey)
+        });
         this.broadcast({ type: 'permission_responded', data });
 
         this.presentNextQueuedPermission(data.agentId);
@@ -250,6 +254,13 @@ class NotchMonitorServer {
         agent.permissionRequest = request;
         agent.lastUpdate = Date.now();
         this.broadcast({
+            type: 'interaction_requested',
+            data: {
+                agentId,
+                request: buildPermissionInteractionRequest(request),
+            },
+        });
+        this.broadcast({
             type: 'permission_requested',
             data: {
                 agentId,
@@ -289,9 +300,11 @@ class NotchMonitorServer {
                 continue;
             }
 
-            if (agent.status === 'completed' && age > COMPLETED_AGENT_TTL_MS) {
-                debugLog(`Cleaning completed agent ${id} age=${age}`);
-                this.unregisterAgent(id);
+            if (agent.status === 'completed') {
+                if (age > COMPLETED_AGENT_TTL_MS) {
+                    debugLog(`Cleaning completed agent ${id} age=${age}`);
+                    this.unregisterAgent(id);
+                }
                 continue;
             }
 
@@ -338,6 +351,47 @@ function permissionKeyForRequest(request) {
     }
 
     return `${type}:input:${normalizePermissionPart(request.message)}`;
+}
+
+function buildPermissionInteractionRequest(request) {
+    const type = normalizePermissionPart(request?.type) || 'Permission';
+    return {
+        id: request?.id || generateId(),
+        kind: 'permission',
+        title: `Allow ${type}`,
+        message: request?.message || null,
+        markdown: null,
+        options: [
+            { id: 'allow', value: 'allow', title: 'Allow', detail: null },
+            { id: 'deny', value: 'deny', title: 'Deny', detail: null },
+            { id: 'allow_similar', value: 'allow_similar', title: 'Allow Similar', detail: 'Session only' },
+        ],
+        textResponse: {
+            enabled: false,
+            placeholder: null,
+        },
+        metadata: {
+            toolName: type,
+            command: request?.command || null,
+            filePath: request?.filePath || null,
+            permissionKey: request?.permissionKey || null,
+        },
+        timestamp: request?.timestamp || Date.now(),
+    };
+}
+
+function buildPermissionInteractionResponse(data, permissionKey) {
+    return {
+        agentId: data.agentId,
+        requestId: data.requestId,
+        selectedOption: data.allowed ? (data.scope === 'session_similar' ? 'allow_similar' : 'allow') : 'deny',
+        text: null,
+        scope: data.scope || 'once',
+        metadata: {
+            permissionKey: permissionKey || null,
+            autoApproved: Boolean(data.autoApproved),
+        }
+    };
 }
 
 function isLiveProcess(pid) {
