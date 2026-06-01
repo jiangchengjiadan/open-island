@@ -1,68 +1,91 @@
 # Open Island
 
-macOS 上用于本地 AI 编码会话的灵动岛风格状态监控。
+<p align="center">
+  <img src="assets/icon/open-island-icon.svg" alt="Open Island" width="128" height="128">
+</p>
 
-[English README](./README.md)
+<h1 align="center">Open Island</h1>
 
-[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)](https://www.apple.com/macos/)
-[![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://www.swift.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-required-339933)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-early%20preview-informational)](#状态)
+<p align="center">
+  <strong>让 AI Agent 从终端黑盒走向桌面。</strong>
+  <br>
+  面向 Claude Code、Codex 和本地 CLI Agent 工作流的 macOS 原生桌面控制岛。
+  <br><br>
+  <a href="README.md">English</a> | <strong>简体中文</strong>
+</p>
 
-Open Island 是一个 macOS 菜单栏应用，适合同时运行多个本地编码 Agent 的开发者。它通过本地 Unix socket bridge 监听 Agent 活动，在刘海附近展示会话状态，弹出支持的权限请求，并允许你一键跳回所属的终端或 IDE。
+<p align="center">
+  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/platform-macOS%2013%2B-black?style=flat-square" alt="macOS 13+"></a>
+  <a href="https://www.swift.org/"><img src="https://img.shields.io/badge/Swift-5.9-orange?style=flat-square" alt="Swift 5.9"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-required-339933?style=flat-square" alt="Node.js required"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  <a href="#状态"><img src="https://img.shields.io/badge/status-early%20preview-informational?style=flat-square" alt="Early preview"></a>
+</p>
 
-## 特性
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#展示">展示</a> ·
+  <a href="#工作原理">工作原理</a> ·
+  <a href="#开发">开发</a>
+</p>
 
-- 实时显示 Claude Code、Codex、Cursor、Gemini CLI 和 Qoder CLI 的会话状态
-- 在面板中展示支持的权限请求
-- 一键跳回对应的终端或 IDE
-- 支持 iTerm/tmux 的会话级跳转，以及 VS Code/Cursor 的 workspace 级跳转
-- 接近真实刘海的 compact / peek / expanded 三态面板
-- Claude 和 Codex usage 页面，展示 5 小时与每周用量窗口
-- 轻量本地 macOS 应用，配合小型 bridge 进程运行
+<p align="center">
+  <img src="assets/media/open-island-main-interface.png" alt="Open Island main interface" width="760">
+</p>
+
+---
+
+## Open Island 是什么？
+
+Open Island 是一个轻量的 macOS 原生应用，为本地 AI 编码 Agent 提供一个桌面级控制面板。它常驻在屏幕刘海或顶部区域，通过本地 Unix socket bridge 监听 Agent 活动，把原本埋在终端里的关键信息展示出来：哪些任务正在运行、哪些任务在等待、哪些权限需要审批，以及应该跳回哪个终端或 IDE。
+
+它不是 Claude Code、Codex 或终端的替代品。它补上的是本地自动化工作流里最后缺失的一块拼图：可见、可控、可跳转。
+
+## 为什么需要它？
+
+AI 编码正在从“问 ChatGPT 一个问题”变成“把任务交给本地 CLI Agent 执行”。你可能会在一个终端里让 Agent 改前端，在另一个终端里跑测试，还在 IDE 内置终端里等它处理权限请求。
+
+这种工作流很强，但会带来三个直接痛点：
+
+- **状态不可见**：Running、Waiting、Completed、Error 分散在多个终端 Tab 和 IDE 面板里。
+- **权限审批容易被漏掉**：Agent 可能只是卡在一个隐藏窗口里的 Approve 提示上，白白等待十分钟。
+- **上下文切换成本高**：一旦需要介入，你仍然要在一堆窗口里找回正确的会话现场。
+
+Open Island 的目标，就是把这些本地 Agent 状态从终端黑盒里“提”出来，变成轻量、一直可见、但不打扰你的系统级状态层。
+
+## 核心能力
+
+- **多会话状态，全局可见**：把本地 Claude Code、Codex 和 Qoder 会话汇聚到一个刘海面板里，清楚区分运行中、等待中、已完成和异常状态。
+- **桌面级权限审批**：支持的权限请求会直接出现在面板中，你可以在当前 IDE 视线内完成批准或拒绝，不必切回终端。
+- **一键回到现场**：点击会话卡片即可跳回对应的 Terminal、iTerm、Ghostty、Warp、VS Code、Cursor 或支持的 IDE 路由，减少多项目并行时的上下文迷失。
+- **刘海原生交互**：支持 compact、hover peek、expanded 三态面板，更贴近真实刘海交互。
+- **Usage 可视化**：在参考 CodexIsland 视觉的 usage 页面中查看 Claude 和 Codex 的 5 小时 / 每周用量窗口。
+- **纯本地 Bridge**：通过小型 Node.js Unix socket bridge 和 macOS 原生 UI 通信，不依赖云端中转、账号或远程遥测。
+- **不改变原有习惯**：继续按原来的方式使用 `claude`、`codex`、终端和 IDE。Open Island 只是观察、汇聚和协调。
 
 ## 展示
 
 ### 主界面
 
-当前应用的真实截图：
-
 ![Open Island real screenshot](./assets/media/open-island-real-screenshot.png)
 
-这张图展示了当前 notch panel UI，以及多个会话的最新状态。
-
-### 品牌图
-
-![Open Island main interface](./assets/media/open-island-main-interface.png)
-
-这是一张更适合 GitHub 首页和分享场景的展示图。
+刘海面板可以集中展示多个活动会话及其最新状态。
 
 ### 权限审批流程
 
 ![Open Island permission approval flow](./assets/media/open-island-permission-flow.gif)
 
-展示 Open Island 如何发现权限请求、在面板中提示，并让你无需切回终端就能处理。
+权限请求可以被捕获、展示，并直接在桌面面板中处理。
 
 ### Terminal / JetBrains 路由示意
 
 ![Open Island terminal and JetBrains routing overview](./assets/media/open-island-terminal-jetbrains-flow.png)
 
-这张图概括了 Terminal / iTerm / JetBrains 会话如何进入 bridge，再回到 notch panel。
-
-打包说明：
-
-- 本地构建 DMG：`bash scripts/package-dmg.sh <version>`
-- 构建出的 DMG 适合上传为 GitHub Release 附件
-- 当前 DMG 默认是未签名的开发者预览版，除非你额外做了签名和 notarization
-
-## 为什么做这个项目
-
-CLI 编码 Agent 很强，但一旦你同时开着 Terminal、iTerm、Claude Code、Codex 以及 IDE 内置终端，就很容易失去对当前会话状态的感知。Open Island 的目标，就是把这些本地 Agent 活动变成一个轻量、始终可见的环境状态 UI。
+本地 Shell 和 IDE 会话通过 hook 进入 bridge，面板再提供回到正确工作现场的路径。
 
 ## 当前支持
 
-当前第一优先级支持：
+当前第一优先级支持的 Agent：
 
 - Claude Code
 - Codex
@@ -78,30 +101,31 @@ CLI 编码 Agent 很强，但一旦你同时开着 Terminal、iTerm、Claude Cod
 - Warp
 - VS Code
 - Cursor
-- JetBrains IDE
+- JetBrains IDEs，但内置终端和同项目多窗口精确路由仍有边界情况
 
-代码结构已经为后续接入更多本地 Agent 留了空间，但目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex、Cursor 和 Qoder。
+项目结构刻意保持轻量和可扩展：Agent hook、bridge 事件和 SwiftUI/AppKit 面板彼此分离，后续可以继续接入更多本地 Agent，而不需要改变产品核心形态。目前的一等公民工作流仍然聚焦在本地 macOS 下的 Claude Code、Codex、Cursor、Gemini CLI 和 Qoder。
 
 ## 状态
 
-Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal、iTerm、Claude Code 和 Codex 为核心的使用场景。它仍然是 early preview，但核心闭环已经存在：会话监控、面板渲染、权限提示以及基础跳转能力都已经可用。
+Open Island 仍然是 early preview，但已经可以用于以 Terminal、iTerm、Claude Code 和 Codex 为核心的本地 macOS 工作流。核心闭环已经存在：会话监控、面板渲染、权限提示和基础跳转能力都已经可用。
 
 目前表现较好的部分：
 
 - 个人和本地开发者工作流
-- bridge、面板渲染和支持的权限流程
+- Bridge 通信与面板渲染
+- 支持的权限审批流程
+- Terminal 和 iTerm 跳转体验
 - compact / peek / expanded 三态 notch 面板交互
-- Terminal 和 iTerm 的跳转体验
 - VS Code 和 Cursor 的 workspace 跳转
 - Codex 默认 hooks 安装和会话去重
 - Gemini CLI 会话监控
 - Qoder 会话监控
 - Claude/Codex usage 展示、刷新和 Claude re-auth 支持
 
-当前已知粗糙点：
+当前边界：
 
 - JetBrains 内置终端跳转仍然存在边界情况
-- JetBrains 同项目多窗口的精确跳转还不稳定
+- JetBrains 同项目多窗口精确跳转还不稳定
 - Ghostty 和 Warp 跳转仍属于首版 best-effort
 - 部分交互依赖 macOS Accessibility 和 AppleScript 的稳定性
 
@@ -112,18 +136,16 @@ Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal�
 - 增加基于 Claude/Codex 本地日志的 token/cost 统计
 - 补更多测试和打包完善工作
 
-## 环境要求
+## 快速开始
+
+### 环境要求
 
 - macOS 13 或更高版本
 - `PATH` 中可用的 Node.js
 - Swift 5.9 或 Xcode Command Line Tools
 - 为跳转和自动化行为开启 Accessibility 权限
 
-## 安装
-
-### 快速开始
-
-安装启动器和本地 hooks：
+### 安装本地 hooks 和启动器
 
 ```bash
 ./scripts/install-hooks.sh
@@ -146,13 +168,43 @@ open-island status
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-如果你要把打包后的 app 分发给其他用户，请先看：
+首次运行时请打开：
+
+```text
+System Settings -> Privacy & Security -> Accessibility
+```
+
+允许你用于启动 Open Island 的终端或应用。如果不开启该权限，面板可能仍能显示，但跳转和自动化行为可能会失败。
+
+## 工作原理
+
+```text
+Claude Code / Codex / local shell
+  -> hook 或 wrapper 事件
+Node.js bridge
+  -> 本地 Unix socket
+SwiftUI + AppKit 刘海面板
+  -> 状态展示、权限操作、跳转动作
+Terminal / iTerm / IDE
+```
+
+Bridge 只在本地通信。如果 Open Island 没有运行，Agent 工作流应该继续照常执行；hooks 的定位是轻量观察层，而不是强依赖。
+
+## 打包构建
+
+分发构建说明：
+
+- 本地构建 DMG：`bash scripts/package-dmg.sh <version>`
+- 构建出的 DMG 适合上传为 GitHub Release 附件
+- 当前 DMG 默认是未签名的开发者预览版，除非你额外做了签名和 notarization
+
+参考：
 
 - [未签名 macOS 安装说明](./docs/unsigned-macos-install.zh-CN.md)
 - [发布清单](./docs/release-checklist.zh-CN.md)
 - [更新日志](./CHANGELOG.md)
 
-### 开发启动方式
+## 开发
 
 启动 bridge：
 
@@ -170,16 +222,12 @@ swift build
 swift run NotchMonitor
 ```
 
-## 首次运行设置
+如果你修改了 hook、wrapper 或跳转逻辑，重新测试前建议重启 app：
 
-Open Island 依赖 macOS Accessibility 来完成窗口激活、终端跳转和权限交互。
-
-首次运行时请检查：
-
-- `System Settings -> Privacy & Security -> Accessibility`
-- 允许你用于启动 Open Island 的终端或应用
-
-如果不开启该权限，面板可能仍能显示，但跳转和自动化行为可能会失败。
+```bash
+open-island stop
+open-island start
+```
 
 ## 使用方式
 
@@ -228,26 +276,6 @@ open-island/
     └── implementation notes and design docs
 ```
 
-## 开发
-
-常用命令：
-
-```bash
-cd bridge && npm install
-cd bridge && npm start
-cd bridge && npm run dev
-
-cd native/NotchMonitor && swift build
-cd native/NotchMonitor && swift run NotchMonitor
-```
-
-如果你修改了 hook、wrapper 或跳转逻辑，重新测试前建议重启 app：
-
-```bash
-open-island stop
-open-island start
-```
-
 ## 排查问题
 
 ### `open-island: command not found`
@@ -273,7 +301,7 @@ swift build
 先检查：
 
 - Open Island 是否正在运行
-- bridge 是否已启动
+- Bridge 是否已启动
 - Accessibility 权限是否已开启
 
 然后查看日志：
@@ -298,32 +326,6 @@ tail -n 200 /tmp/notch-monitor-codex-wrapper.log
 
 目前不支持。当前设计目标是单台 Mac 上的本地开发者工作流。
 
-### 为什么 JetBrains 的跳转不如 Terminal / iTerm 稳定？
+### Open Island 会上传我的 Agent 活动吗？
 
-JetBrains 暴露给 UI 自动化的表面能力不如 Terminal 和 iTerm 稳定。Open Island 通常能把正确的 IDE 激活到前台，但同项目多窗口的精确定位仍有限制。
-
-### Codex 开箱即用吗？
-
-是的。安装器会给 Codex 创建一个本地 wrapper，这样 Open Island 能在不改变你平时命令的前提下观察会话。
-
-## 日志
-
-常用调试日志：
-
-- `/tmp/notch-monitor-jump.log`
-- `/tmp/notch-monitor-hook.log`
-- `/tmp/notch-monitor-codex-wrapper.log`
-
-## 贡献
-
-欢迎提 Issue 和 PR。
-
-提交修改前建议至少做这些本地校验：
-
-- `cd native/NotchMonitor && swift build`
-- `cd bridge && npm install`
-- 手动验证 bridge 启动、面板渲染、权限提示和跳转行为
-
-## License
-
-MIT
+不会。当前 bridge 是纯本地通信，通过本地 Unix socket 传递事件。
