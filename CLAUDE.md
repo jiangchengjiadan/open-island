@@ -54,7 +54,21 @@ swift run NotchMonitor   # Run the app
 ### Full Installation
 ```bash
 ./scripts/install-hooks.sh   # Installs bridge deps, configures hooks, creates the `open-island` launcher
+```
+
+### Open Island CLI
+After installation, use the `open-island` command to manage the application:
+```bash
 open-island start            # Starts the app via the generated launcher
+open-island stop             # Stops the app
+open-island restart          # Restarts the app
+open-island status           # Checks the app status
+```
+
+### Packaging
+To create a DMG for distribution:
+```bash
+./scripts/package-dmg.sh [version]  # Creates a DMG file in dist/ directory (version defaults to 0.1.0)
 ```
 
 ## Message Protocol (Unix Socket JSON)
@@ -75,9 +89,39 @@ Messages exchanged over the socket are newline-delimited JSON:
 
 - `bridge/server.js`: `NotchMonitorServer` class - handles socket connections, agent state, message routing
 - `bridge/hook.js`: `NotchMonitorHook` class - client library for AI tools to connect and communicate
+- `bridge/codex-wrapper.js`: Wraps Codex CLI to capture and forward session events
 - `native/NotchMonitor/Sources/Services/SocketService.swift`: Observable service managing agent state for SwiftUI
 - `native/NotchMonitor/Sources/Views/NotchPanel.swift`: Main UI with agent cards, status dots, permission badges
 - `native/NotchMonitor/Sources/Models/Agent.swift`: Data models (Agent, AgentType, AgentStatus, PermissionRequest)
+
+## Troubleshooting
+
+### `open-island: command not found`
+Add `~/.local/bin` to your `PATH`:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Swift build fails after renaming or moving the repo
+Clean the Swift module cache:
+```bash
+cd native/NotchMonitor
+swift package clean
+swift build
+```
+
+### Jump works for Terminal but not for an IDE
+Check:
+- Open Island is running
+- The bridge is up
+- Accessibility permission is enabled
+
+Inspect logs:
+```bash
+tail -n 200 /tmp/notch-monitor-jump.log
+tail -n 200 /tmp/notch-monitor-hook.log
+tail -n 200 /tmp/notch-monitor-codex-wrapper.log
+```
 
 ## Design System
 
