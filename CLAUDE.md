@@ -90,7 +90,9 @@ Messages exchanged over the socket are newline-delimited JSON:
 - `bridge/server.js`: `NotchMonitorServer` class - handles socket connections, agent state, message routing
 - `bridge/hook.js`: `NotchMonitorHook` class - client library for AI tools to connect and communicate
 - `bridge/codex-wrapper.js`: Wraps Codex CLI to capture and forward session events
+- `bridge/utils.js`: Shared utility functions for bridge components (slug generation, terminal detection, process chain analysis, etc.)
 - `native/NotchMonitor/Sources/Services/SocketService.swift`: Observable service managing agent state for SwiftUI
+- `native/NotchMonitor/Sources/Services/PowerAssertionService.swift`: Manages power assertions to keep Mac awake while AI agents are running
 - `native/NotchMonitor/Sources/Views/NotchPanel.swift`: Main UI with agent cards, status dots, permission badges
 - `native/NotchMonitor/Sources/Models/Agent.swift`: Data models (Agent, AgentType, AgentStatus, PermissionRequest)
 
