@@ -1,8 +1,18 @@
 const fs = require('fs');
 const net = require('net');
-const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const {
+  slug,
+  terminalOf,
+  ttyOf,
+  processInfoOf,
+  processChainOf,
+  collectEnvHints,
+  collectJetBrainsContext,
+  isJetBrainsTerminal,
+  terminalTitleTokenFor,
+  writeTerminalTitle
+} = require('./utils');
 
 const SOCKET_PATH = '/tmp/notch-monitor.sock';
 const HOOK_LOG_PATH = '/tmp/notch-monitor-hook.log';
@@ -26,24 +36,6 @@ function readStdin() {
     process.stdin.on('end', () => resolve(data));
     process.stdin.resume();
   });
-}
-
-function parseJson(text) {
-  if (!text || !text.trim()) return {};
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    fs.appendFileSync(HOOK_LOG_PATH, `[${new Date().toISOString()}] JSON parse failed: ${error.message}\n${text}\n\n`);
-    return {};
-  }
-}
-
-function slug(text, fallback = 'session') {
-  return String(text || fallback)
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || fallback;
 }
 
 function eventNameOf(payload) {
@@ -93,148 +85,13 @@ function sessionNameOf(source, payload) {
   );
 }
 
-function terminalOf() {
-  return (
-    process.env.TERM_PROGRAM_APP ||
-    process.env.TERM_PROGRAM ||
-    process.env.TERM ||
-    process.env.TTY ||
-    os.hostname()
-  );
-}
-
-function ttyOf() {
+function parseJson(text) {
+  if (!text || !text.trim()) return {};
   try {
-    const tty = execFileSync('/usr/bin/tty', [], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'ignore'] }).trim();
-    if (!tty || tty === 'not a tty') {
-      const parentTTY = parentTTYOf();
-      return parentTTY || terminalOf();
-    }
-    return tty.replace('/dev/', '');
-  } catch (_) {
-    return parentTTYOf() || terminalOf();
-  }
-}
-
-function parentTTYOf() {
-  try {
-    const tty = execFileSync('/bin/ps', ['-p', String(process.ppid), '-o', 'tty='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (!tty || tty === '??') {
-      return '';
-    }
-    return tty;
-  } catch (_) {
-    return '';
-  }
-}
-
-function processInfoOf(pid) {
-  try {
-    const output = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=,comm='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (!output) return null;
-
-    const columns = output.split(/\s+/, 2);
-    if (columns.length < 2) return null;
-
-    return {
-      ppid: Number(columns[0]),
-      command: path.basename(columns[1]),
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
-function processChainOf(startPid, limit = 8) {
-  const chain = [];
-  let current = Number(startPid);
-  const seen = new Set();
-
-  while (current > 1 && chain.length < limit && !seen.has(current)) {
-    seen.add(current);
-    const info = processInfoOf(current);
-    if (!info) break;
-    chain.push(`${current}:${info.command}`);
-    current = info.ppid;
-  }
-
-  return chain;
-}
-
-function collectEnvHints() {
-  const keys = [
-    'TERM',
-    'TERM_PROGRAM',
-    'TERM_PROGRAM_APP',
-    'TERMINAL_EMULATOR',
-    'COLORTERM',
-    'SHELL',
-    'PWD',
-    'KITTY_WINDOW_ID',
-    'ITERM_SESSION_ID',
-    'ITERM_PROFILE',
-    'VSCODE_GIT_IPC_HANDLE',
-  ];
-
-  return Object.fromEntries(
-    keys
-      .map((key) => [key, process.env[key]])
-      .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
-  );
-}
-
-function collectJetBrainsContext() {
-  const prefixes = ['JETBRAINS', 'IDEA', 'PYCHARM'];
-  const exactKeys = [
-    'TERMINAL_EMULATOR',
-    'TERM_PROGRAM',
-    'TERM_PROGRAM_APP',
-    'PWD',
-    'SHELL',
-  ];
-
-  const entries = Object.entries(process.env).filter(([key, value]) => {
-    if (typeof value !== 'string' || value.trim() === '') return false;
-    return exactKeys.includes(key) || prefixes.some((prefix) => key.startsWith(prefix));
-  });
-
-  return Object.fromEntries(entries);
-}
-
-function isJetBrainsTerminal() {
-  const marker = `${process.env.TERMINAL_EMULATOR || ''} ${process.env.TERM_PROGRAM || ''} ${process.env.TERM_PROGRAM_APP || ''}`.toLowerCase();
-  return marker.includes('jediterm') || marker.includes('jetbrains') || marker.includes('idea') || marker.includes('pycharm');
-}
-
-function normalizedTTY() {
-  return ttyOf().replace(/^\/dev\//, '');
-}
-
-function ttyDevicePath() {
-  const tty = normalizedTTY();
-  if (!tty.startsWith('ttys') && !tty.startsWith('pts/')) {
-    return null;
-  }
-  return `/dev/${tty}`;
-}
-
-function terminalTitleTokenFor(source, pid, sessionId) {
-  const sessionPart = slug(sessionId || 'session').slice(0, 12);
-  return `OI ${source} ${normalizedTTY()} p${pid} ${sessionPart}`;
-}
-
-function writeTerminalTitle(title) {
-  const ttyPath = ttyDevicePath();
-  if (!ttyPath) return false;
-
-  try {
-    fs.writeFileSync(ttyPath, `\u001b]0;${title}\u0007`);
-    return true;
-  } catch (_) {
-    return false;
+    return JSON.parse(text);
+  } catch (error) {
+    fs.appendFileSync(HOOK_LOG_PATH, `[${new Date().toISOString()}] JSON parse failed: ${error.message}\n${text}\n\n`);
+    return {};
   }
 }
 
@@ -310,6 +167,81 @@ function permissionOutput(eventName, allowed) {
         : 'Denied in NotchMonitor',
     },
   };
+}
+
+/**
+ * 为 legacy register/update 生成稳定的 agent id，避免每次 update 都创建新会话。
+ */
+function legacyAgentId(agentType) {
+  const tty = slug(ttyOf() || terminalOf(), 'terminal');
+  const cwd = slug(process.cwd(), 'cwd');
+  return `${agentType}:legacy:${tty}:${cwd}`;
+}
+
+/**
+ * 解析 legacy 模式下展示用的 agent 名称，但不参与会话唯一标识。
+ */
+function legacyAgentName(agentType, agentName = '') {
+  if (typeof agentName === 'string' && agentName.trim() !== '') {
+    return agentName.trim();
+  }
+  if (typeof process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME === 'string' && process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME.trim() !== '') {
+    return process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME.trim();
+  }
+  return `${agentType}-session`;
+}
+
+/**
+ * 构造 legacy 模式下共享的 agent payload，确保 register 和 update 命中同一标识。
+ */
+function legacyAgentPayload(agentId, agentName, agentType, status, currentTask) {
+  return {
+    id: agentId,
+    name: agentName,
+    type: agentType,
+    status,
+    terminal: ttyOf(),
+    terminalApp: terminalOf(),
+    tty: ttyOf(),
+    cwd: process.cwd(),
+    pid: process.ppid,
+    terminalTitleToken: isJetBrainsTerminal() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
+    parentPid: processInfoOf(process.ppid)?.ppid || null,
+    parentCommand: processInfoOf(process.ppid)?.command || null,
+    processChain: processChainOf(process.ppid),
+    environmentHints: collectEnvHints(),
+    jetbrainsContext: collectJetBrainsContext(),
+    currentTask,
+    lastUpdate: Date.now(),
+  };
+}
+
+/**
+ * 为 legacy register 注册清理钩子，避免遗留悬空会话。
+ */
+function registerLegacyCleanup(client) {
+  let didCleanup = false;
+
+  const cleanup = () => {
+    if (didCleanup) {
+      return;
+    }
+    didCleanup = true;
+    client.unregister();
+    client.close();
+  };
+
+  process.once('SIGINT', () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  process.once('SIGTERM', () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  process.once('exit', cleanup);
 }
 
 class BridgeClient {
@@ -490,63 +422,26 @@ async function runEventHook(source) {
 }
 
 async function runLegacyRegister(agentName, agentType = 'claude') {
-  const agentId = `${agentType}:${slug(agentName)}:${Date.now()}`;
+  const resolvedName = legacyAgentName(agentType, agentName);
+  const agentId = legacyAgentId(agentType);
   const client = new BridgeClient(agentId);
   await client.connect();
   client.send({
     type: 'agent_register',
-    data: {
-      id: agentId,
-      name: agentName,
-      type: agentType,
-      status: 'running',
-      terminal: ttyOf(),
-      terminalApp: terminalOf(),
-      tty: ttyOf(),
-      cwd: process.cwd(),
-      pid: process.ppid,
-      terminalTitleToken: isJetBrainsTerminal() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
-      parentPid: processInfoOf(process.ppid)?.ppid || null,
-      parentCommand: processInfoOf(process.ppid)?.command || null,
-      processChain: processChainOf(process.ppid),
-      environmentHints: collectEnvHints(),
-      jetbrainsContext: collectJetBrainsContext(),
-      currentTask: 'Session started',
-      lastUpdate: Date.now(),
-    },
+    data: legacyAgentPayload(agentId, resolvedName, agentType, 'running', 'Session started'),
   });
-  process.on('SIGINT', () => {
-    client.unregister();
-    client.close();
-    process.exit(0);
-  });
+  registerLegacyCleanup(client);
 }
 
 async function runLegacyUpdate(status, currentTask, agentType = 'claude') {
-  const agentId = `${agentType}:${Date.now()}`;
+  // 保持 legacy update 与默认 legacy register 的名称一致，避免写入不同会话。
+  const agentName = `${agentType}-session`;
+  const agentId = legacyAgentId(agentType);
   const client = new BridgeClient(agentId);
   await client.connect();
   client.send({
     type: 'agent_update',
-    data: {
-      id: agentId,
-      name: `${agentType}-session`,
-      type: agentType,
-      status,
-      terminal: ttyOf(),
-      terminalApp: terminalOf(),
-      tty: ttyOf(),
-      cwd: process.cwd(),
-      pid: process.ppid,
-      terminalTitleToken: isJetBrainsTerminal() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
-      parentPid: processInfoOf(process.ppid)?.ppid || null,
-      parentCommand: processInfoOf(process.ppid)?.command || null,
-      processChain: processChainOf(process.ppid),
-      environmentHints: collectEnvHints(),
-      jetbrainsContext: collectJetBrainsContext(),
-      currentTask,
-      lastUpdate: Date.now(),
-    },
+    data: legacyAgentPayload(agentId, agentName, agentType, status, currentTask),
   });
   client.close();
 }

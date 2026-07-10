@@ -380,6 +380,10 @@ class SocketService: ObservableObject {
                     status: .running,
                     terminal: tty == "??" ? "background" : tty,
                     tty: tty == "??" ? nil : tty,
+                    // Carry the runtime pid through process discovery so
+                    // socket- and process-originated views of the same session
+                    // resolve to the same dedupe key.
+                    pid: Int(pid),
                     currentTask: args,
                     lastUpdate: Date()
                 )
@@ -393,24 +397,16 @@ class SocketService: ObservableObject {
         }
     }
 
+    /// Merges agents from all discovery sources before deduplication so sessions
+    /// are never dropped purely because they share the same display name.
     private func publishAgents() {
-        var merged = Array(socketAgents.values)
-        let existingNames = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
-
-        for agent in processAgents.values {
-            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
-            if !existingNames.contains(key) {
-                merged.append(agent)
-            }
-        }
-
-        let namesAfterProcessMerge = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
-        for agent in codexAgents.values {
-            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
-            if !namesAfterProcessMerge.contains(key) {
-                merged.append(agent)
-            }
-        }
+        var merged = mergedAgents(
+            from: [
+                Array(socketAgents.values),
+                Array(processAgents.values),
+                Array(codexAgents.values)
+            ]
+        )
 
         merged = merged.map { agent in
             var updatedAgent = agent
@@ -435,6 +431,12 @@ class SocketService: ObservableObject {
         refreshInteractivePrompts(for: agents)
     }
 
+    /// Flattens discovery sources in priority order and keeps every candidate
+    /// until runtime-aware deduplication decides whether two entries are the same session.
+    private func mergedAgents(from sources: [[Agent]]) -> [Agent] {
+        sources.flatMap { $0 }
+    }
+
     private func deduplicatedAgents(from merged: [Agent]) -> [Agent] {
         var selectedByKey: [String: Agent] = [:]
 
@@ -450,14 +452,30 @@ class SocketService: ObservableObject {
         return Array(selectedByKey.values)
     }
 
+    /// Builds a composite runtime key so same-name sessions remain distinct when
+    /// they differ by tty, pid, or cwd, while duplicate entries from different
+    /// discovery sources still collapse to one logical session.
     private func dedupeKey(for agent: Agent) -> String {
-        if let tty = normalizedTTY(agent.tty ?? agent.terminal), !tty.isEmpty {
+        let tty = normalizedTTY(agent.tty ?? agent.terminal)
+        let pid = agent.pid.map(String.init)
+        let cwd = normalizedCWD(agent.cwd)
+
+        if let tty, let pid {
+            return "\(agent.type.rawValue)|tty:\(tty)|pid:\(pid)"
+        }
+        if let tty, let cwd {
+            return "\(agent.type.rawValue)|tty:\(tty)|cwd:\(cwd)"
+        }
+        if let pid, let cwd {
+            return "\(agent.type.rawValue)|pid:\(pid)|cwd:\(cwd)"
+        }
+        if let tty {
             return "\(agent.type.rawValue)|tty:\(tty)"
         }
-        if let pid = agent.pid {
+        if let pid {
             return "\(agent.type.rawValue)|pid:\(pid)"
         }
-        if let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !cwd.isEmpty {
+        if let cwd {
             return "\(agent.type.rawValue)|cwd:\(cwd)"
         }
         return "\(agent.type.rawValue)|name:\(agent.name.lowercased())"
@@ -470,6 +488,13 @@ class SocketService: ObservableObject {
         if trimmed.hasPrefix("/dev/") {
             return String(trimmed.dropFirst("/dev/".count))
         }
+        return trimmed
+    }
+
+    private func normalizedCWD(_ cwd: String?) -> String? {
+        guard let cwd else { return nil }
+        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
         return trimmed
     }
 
@@ -531,10 +556,11 @@ class SocketService: ObservableObject {
         }
     }
 
+    /// 仅对当前能够安全读取与提交交互式 prompt 的会话开启检测。
     private func shouldInspectInteractivePrompt(agent: Agent) -> Bool {
         guard !agent.needsPermission else { return false }
-        guard let terminalApp = agent.terminalApp?.lowercased(), terminalApp.contains("terminal") else { return false }
         guard let tty = agent.tty, !tty.isEmpty else { return false }
+        guard TerminalPromptService.supportsInlinePrompt(for: agent) else { return false }
         return agent.status == .waiting || agent.type == .codex
     }
 

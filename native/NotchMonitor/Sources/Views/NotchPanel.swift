@@ -59,9 +59,14 @@ struct NotchPanelView: View {
 struct EmptyStateView: View {
     @EnvironmentObject var socketService: SocketService
     @ObservedObject private var bootstrapService = AppBootstrapService.shared
+    @ObservedObject private var powerService = PowerAssertionService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if powerService.isKeepingAwake || powerService.isPausedForPower {
+                KeepAwakeBanner()
+            }
+
             HStack(spacing: 12) {
                 Circle()
                     .fill(statusTint.opacity(0.22))
@@ -112,7 +117,7 @@ struct EmptyStateView: View {
             return "Installing hooks, wrapper, and local bridge support."
         }
         return socketService.isConnected
-            ? "Launch Claude Code, Codex, or Gemini CLI and they will appear here."
+            ? "Launch Claude Code or Codex and they will appear here. Claude hooks install automatically, and Codex session monitoring uses the local wrapper by default."
             : "Waiting for the local bridge to reconnect."
     }
 
@@ -129,6 +134,60 @@ struct EmptyStateView: View {
             .sorted { $0.state.priority < $1.state.priority }
             .prefix(4)
             .map { $0 }
+    }
+}
+
+struct KeepAwakeBanner: View {
+    @ObservedObject private var powerService = PowerAssertionService.shared
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(tint.opacity(0.22))
+                .frame(width: 16, height: 16)
+                .overlay(
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 7, height: 7)
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundColor(Color(hex: "#f3efe4"))
+                Text(detail)
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .foregroundColor(Color.white.opacity(0.42))
+                    .lineLimit(2)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.055), lineWidth: 1)
+        )
+    }
+
+    private var title: String {
+        powerService.isKeepingAwake ? "Keeping Mac awake" : "Keep Awake paused"
+    }
+
+    private var detail: String {
+        if powerService.isKeepingAwake {
+            return "Open Island is preventing idle sleep while AI agents run."
+        }
+        return "Plug in power or disable power-only mode from the menu bar."
+    }
+
+    private var tint: Color {
+        powerService.isKeepingAwake ? Color(hex: "#14b8a6") : Color(hex: "#f59e0b")
     }
 }
 
@@ -288,7 +347,7 @@ struct CompactAgentRow: View {
             }
         }
         .contextMenu {
-            Button("Jump to Terminal") {
+            Button("Jump to Session") {
                 jumpToTerminal(agent)
             }
             if agent.needsPermission {
@@ -317,7 +376,9 @@ struct CompactAgentRow: View {
             return "Approval requested in \(terminalLabel)"
         }
         if agent.interactivePrompt != nil {
-            return "Select an option without switching context"
+            return terminalLabel == "Terminal"
+                ? "Select an option without switching context"
+                : "Inline choices are only available when the session can be matched to Terminal.app"
         }
         return agent.currentTask ?? "Waiting for activity"
     }
@@ -362,9 +423,12 @@ struct CompactAgentRow: View {
 
     private var terminalLabel: String {
         let raw = (agent.terminalApp ?? agent.terminal).lowercased()
+        if raw.contains("cursor") { return "Cursor" }
+        if raw.contains("visual studio code") || raw.contains("vscode") { return "VS Code" }
         if raw.contains("iterm") { return "iTerm" }
         if raw.contains("terminal") { return "Terminal" }
         if raw.contains("ghostty") { return "Ghostty" }
+        if raw.contains("jetbrains") || raw.contains("jediterm") { return "JetBrains" }
         if raw.contains("pycharm") { return "PyCharm" }
         if raw.contains("idea") { return "IDEA" }
         return "Shell"
@@ -388,10 +452,12 @@ struct CompactAgentRow: View {
         return Color(hex: agent.status.colorHex)
     }
 
+    /// 跳回 agent 所属终端或 IDE。
     func jumpToTerminal(_ agent: Agent) {
         TerminalJumpService.jump(to: agent)
     }
 
+    /// 向 socket 服务回传权限审批结果。
     func respondToPermission(_ agentId: String, allowed: Bool) {
         NotificationCenter.default.post(
             name: .init("PermissionResponse"),
@@ -400,9 +466,11 @@ struct CompactAgentRow: View {
         )
     }
 
+    /// 仅在成功提交到目标会话后清除 prompt，避免失败时错误隐藏可操作项。
     func submitInteractiveOption(_ option: InteractiveOption, for agent: Agent) {
-        SocketService.shared.clearInteractivePrompt(agentId: agent.id)
-        TerminalPromptService.submit(option: option, to: agent)
+        if TerminalPromptService.submit(option: option, to: agent) {
+            SocketService.shared.clearInteractivePrompt(agentId: agent.id)
+        }
     }
 }
 

@@ -19,6 +19,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var mouseMonitor: Any?
     var localMouseMonitor: Any?
     var permissionAttentionObserver: AnyCancellable?
+    var keepAwakeObserver: AnyCancellable?
+    var keepAwakeStateObserver: AnyCancellable?
     var bootstrapObserver: AnyCancellable?
     var onboardingObserver: AnyCancellable?
     var socketStartObserver: AnyCancellable?
@@ -49,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 等 bridge 起稳后再接 socket，避免 DMG 首启时 process fallback 和 socket 注册打架
         scheduleSocketStartup()
         observePermissionAttention()
+        observeKeepAwakeState()
         observeBootstrapState()
         observeOnboardingState()
 
@@ -99,8 +102,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func cleanup() {
         AppBootstrapService.shared.stop()
+        PowerAssertionService.shared.disableForShutdown()
         permissionAttentionObserver?.cancel()
         permissionAttentionObserver = nil
+        keepAwakeObserver?.cancel()
+        keepAwakeObserver = nil
+        keepAwakeStateObserver?.cancel()
+        keepAwakeStateObserver = nil
         bootstrapObserver?.cancel()
         bootstrapObserver = nil
         onboardingObserver?.cancel()
@@ -136,6 +144,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.hadPendingPermission = hasPendingPermission
             }
+    }
+
+    func observeKeepAwakeState() {
+        keepAwakeObserver?.cancel()
+        keepAwakeObserver = SocketService.shared.$agents
+            .receive(on: RunLoop.main)
+            .sink { agents in
+                PowerAssertionService.shared.reevaluate(with: agents)
+            }
+
+        keepAwakeStateObserver?.cancel()
+        keepAwakeStateObserver = Publishers.CombineLatest3(
+            PowerAssertionService.shared.$isKeepingAwake,
+            PowerAssertionService.shared.$isPausedForPower,
+            PowerAssertionService.shared.$isEnabled
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _, _, _ in
+            self?.panelWindow?.refreshCollapsedSummary()
+        }
     }
 
     func observeBootstrapState() {
@@ -202,6 +230,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showStatusMenu() {
         let menu = NSMenu()
+        let keepAwakeStatus = NSMenuItem(title: keepAwakeStatusTitle(), action: nil, keyEquivalent: "")
+        keepAwakeStatus.isEnabled = false
+        menu.addItem(keepAwakeStatus)
+
+        let keepAwakeItem = NSMenuItem(title: "Keep Awake While Agents Run", action: #selector(toggleKeepAwake), keyEquivalent: "")
+        keepAwakeItem.target = self
+        keepAwakeItem.state = PowerAssertionService.shared.isEnabled ? .on : .off
+        menu.addItem(keepAwakeItem)
+
+        let powerOnlyItem = NSMenuItem(title: "Only On Power Adapter", action: #selector(toggleKeepAwakePowerOnly), keyEquivalent: "")
+        powerOnlyItem.target = self
+        powerOnlyItem.state = PowerAssertionService.shared.onlyOnPowerAdapter ? .on : .off
+        powerOnlyItem.isEnabled = PowerAssertionService.shared.isEnabled
+        menu.addItem(powerOnlyItem)
+
+        menu.addItem(.separator())
+
         let setupItem = NSMenuItem(title: "Open Setup Guide", action: #selector(openSetupGuide), keyEquivalent: "")
         setupItem.target = self
         menu.addItem(setupItem)
@@ -222,6 +267,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func runSetupAgain() {
         AppBootstrapService.shared.retrySetup()
+    }
+
+    @objc func toggleKeepAwake() {
+        PowerAssertionService.shared.isEnabled.toggle()
+    }
+
+    @objc func toggleKeepAwakePowerOnly() {
+        PowerAssertionService.shared.onlyOnPowerAdapter.toggle()
+    }
+
+    private func keepAwakeStatusTitle() -> String {
+        let service = PowerAssertionService.shared
+        if service.isKeepingAwake {
+            return "Keep Awake: Active"
+        }
+        if service.isPausedForPower {
+            return "Keep Awake: Paused (Power Adapter Required)"
+        }
+        if !service.isEnabled {
+            return "Keep Awake: Off"
+        }
+        return "Keep Awake: Waiting For Agents"
     }
 
     func startMouseMonitoring() {
@@ -665,6 +732,12 @@ class NotchPanelWindow: NSPanel {
     }
 
     private func collapsedSummaryText(for agents: [Agent]) -> String {
+        if PowerAssertionService.shared.isKeepingAwake {
+            return "Keeping Mac awake"
+        }
+        if PowerAssertionService.shared.isPausedForPower {
+            return "Awake paused: plug in power"
+        }
         if agents.isEmpty, AppBootstrapService.shared.hasBlockingIssue {
             return shortTitle(for: AppBootstrapService.shared.headline)
         }
@@ -710,6 +783,10 @@ class NotchPanelWindow: NSPanel {
             color = NSColor.systemYellow
         } else if AppBootstrapService.shared.isBootstrapping {
             color = NSColor.systemBlue
+        } else if PowerAssertionService.shared.isKeepingAwake {
+            color = NSColor.systemTeal
+        } else if PowerAssertionService.shared.isPausedForPower {
+            color = NSColor.systemYellow
         } else {
             color = NSColor.systemGreen
         }

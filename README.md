@@ -15,8 +15,9 @@ Open Island is a macOS menu bar app for people who run multiple local coding age
 ## Highlights
 
 - Live session status for Claude Code and Codex
-- Permission prompts surfaced in the panel
+- Supported permission prompts surfaced in the panel
 - One-click jump back to the owning terminal or IDE
+- Inline numbered prompt choices for Terminal.app sessions when the target tty can be matched safely
 - Lightweight local macOS app with a small bridge process
 
 ## Showcase
@@ -64,16 +65,29 @@ Primary support today:
 - Claude Code
 - Codex
 
+Current support boundaries:
+
+- Claude Code hooks are installed automatically
+- Codex session monitoring works through the local wrapper by default
+- Codex bridge hooks are opt-in via `NOTCH_MONITOR_ENABLE_CODEX_HOOKS=1`
+- Inline prompt selection currently targets Terminal.app sessions only when the tty can be matched safely
+
+Recognized but not first-class yet:
+
+- The codebase still preserves heuristic detection and UI model types for `Cursor`, `Gemini`, and `OpenCode`
+- Those types are currently compatibility-oriented or forward-looking placeholders, not a promise of end-to-end support parity with Claude Code and Codex
+- Documentation, install flow, permission handling, and inline prompt behavior should be read as first-class only for Claude Code and Codex unless a section explicitly says otherwise
+
 The codebase leaves room for more local agent integrations, but the current first-class workflow is centered on Claude Code and Codex.
 
 ## Status
 
-Open Island is already usable for local macOS workflows centered on Terminal, iTerm, Claude Code, and Codex. It is still an early preview, but the core loop is in place: session monitoring, panel rendering, permission surfacing, and basic jump behavior are working.
+Open Island is already usable for local macOS workflows centered on Terminal, iTerm, Claude Code, and Codex. It is still an early preview, but the core loop is in place: session monitoring, panel rendering, supported permission surfacing, and basic jump behavior are working.
 
 What works well today:
 
 - personal and local developer workflows
-- bridge, panel rendering, and supported permission flows
+- bridge, panel rendering, Claude permission flows, and Codex session monitoring via the wrapper
 - terminal and iTerm jump behavior
 
 Current rough edges:
@@ -81,6 +95,7 @@ Current rough edges:
 - JetBrains embedded terminal routing still has edge cases
 - same-project multi-window JetBrains routing is not consistently precise
 - some interactions depend on Accessibility and AppleScript stability
+- inline prompt selection is intentionally limited to Terminal.app sessions that can be matched by tty
 
 Near-term focus:
 
@@ -161,7 +176,7 @@ Without this permission, the panel may still render, but jump and automation beh
 2. Launch Claude Code or Codex normally
 3. Watch live sessions appear in the notch panel
 4. Click a session to jump back to its terminal or IDE
-5. Use the panel to review supported permission prompts
+5. Use the panel to review supported permission prompts and Terminal.app inline choices
 
 ## Project Structure
 
@@ -254,6 +269,10 @@ No. The app depends on macOS UI automation, menu bar APIs, and Unix-domain local
 ### Does it support remote agents or cloud-hosted sessions?
 
 Not today. The current design is for local developer workflows on one Mac.
+
+### Are Codex hooks enabled automatically?
+
+No. Open Island installs the Codex wrapper automatically for session monitoring, but Codex bridge hooks stay disabled by default. Enable them explicitly with `NOTCH_MONITOR_ENABLE_CODEX_HOOKS=1` before running the installer if you want Codex hook events routed through the bridge.
 
 ### Why is JetBrains jump behavior less reliable than Terminal or iTerm?
 

@@ -1,8 +1,19 @@
 const net = require('net');
-const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { spawn, execFileSync } = require('child_process');
+const { spawn } = require('child_process');
+const {
+  slug,
+  terminalOf,
+  ttyOf,
+  processInfoOf,
+  processChainOf,
+  collectEnvHints,
+  collectJetBrainsContext,
+  isJetBrainsTerminal,
+  terminalTitleTokenFor,
+  writeTerminalTitle
+} = require('./utils');
 
 const SOCKET_PATH = '/tmp/notch-monitor.sock';
 const LOG_PATH = '/tmp/notch-monitor-codex-wrapper.log';
@@ -11,146 +22,6 @@ function log(message) {
   try {
     fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
   } catch (_) {}
-}
-
-function slug(text, fallback = 'session') {
-  return String(text || fallback)
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || fallback;
-}
-
-function terminalOf() {
-  return (
-    process.env.TERM_PROGRAM_APP ||
-    process.env.TERM_PROGRAM ||
-    process.env.TERM ||
-    process.env.TTY ||
-    os.hostname()
-  );
-}
-
-function ttyOf() {
-  try {
-    const tty = execFileSync('/usr/bin/tty', [], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'ignore'] }).trim();
-    if (!tty || tty === 'not a tty') {
-      return terminalOf();
-    }
-    return tty.replace('/dev/', '');
-  } catch (_) {
-    return terminalOf();
-  }
-}
-
-function processInfoOf(pid) {
-  try {
-    const output = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=,comm='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (!output) return null;
-
-    const columns = output.split(/\s+/, 2);
-    if (columns.length < 2) return null;
-
-    return {
-      ppid: Number(columns[0]),
-      command: path.basename(columns[1]),
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
-function processChainOf(startPid, limit = 8) {
-  const chain = [];
-  let current = Number(startPid);
-  const seen = new Set();
-
-  while (current > 1 && chain.length < limit && !seen.has(current)) {
-    seen.add(current);
-    const info = processInfoOf(current);
-    if (!info) break;
-    chain.push(`${current}:${info.command}`);
-    current = info.ppid;
-  }
-
-  return chain;
-}
-
-function collectEnvHints() {
-  const keys = [
-    'TERM',
-    'TERM_PROGRAM',
-    'TERM_PROGRAM_APP',
-    'TERMINAL_EMULATOR',
-    'COLORTERM',
-    'SHELL',
-    'PWD',
-    'KITTY_WINDOW_ID',
-    'ITERM_SESSION_ID',
-    'ITERM_PROFILE',
-    'VSCODE_GIT_IPC_HANDLE',
-  ];
-
-  return Object.fromEntries(
-    keys
-      .map((key) => [key, process.env[key]])
-      .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
-  );
-}
-
-function collectJetBrainsContext() {
-  const prefixes = ['JETBRAINS', 'IDEA', 'PYCHARM'];
-  const exactKeys = [
-    'TERMINAL_EMULATOR',
-    'TERM_PROGRAM',
-    'TERM_PROGRAM_APP',
-    'PWD',
-    'SHELL',
-  ];
-
-  const entries = Object.entries(process.env).filter(([key, value]) => {
-    if (typeof value !== 'string' || value.trim() === '') return false;
-    return exactKeys.includes(key) || prefixes.some((prefix) => key.startsWith(prefix));
-  });
-
-  return Object.fromEntries(entries);
-}
-
-function isJetBrainsTerminal() {
-  const marker = `${process.env.TERMINAL_EMULATOR || ''} ${process.env.TERM_PROGRAM || ''} ${process.env.TERM_PROGRAM_APP || ''}`.toLowerCase();
-  return marker.includes('jediterm') || marker.includes('jetbrains') || marker.includes('idea') || marker.includes('pycharm');
-}
-
-function normalizedTTY() {
-  const tty = ttyOf();
-  return tty.replace(/^\/dev\//, '');
-}
-
-function terminalTitleTokenFor(source, pid) {
-  return `OI ${source} ${normalizedTTY()} p${pid}`;
-}
-
-function ttyDevicePath() {
-  const tty = normalizedTTY();
-  if (!tty.startsWith('ttys') && !tty.startsWith('pts/')) {
-    return null;
-  }
-  return `/dev/${tty}`;
-}
-
-function writeTerminalTitle(title) {
-  const ttyPath = ttyDevicePath();
-  if (!ttyPath) return false;
-
-  try {
-    fs.writeFileSync(ttyPath, `\u001b]0;${title}\u0007`);
-    return true;
-  } catch (_) {
-    return false;
-  }
 }
 
 function currentTaskFromArgs(args) {

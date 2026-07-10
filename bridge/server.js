@@ -1,6 +1,5 @@
 const net = require('net');
 const fs = require('fs');
-const path = require('path');
 
 const SOCKET_PATH = '/tmp/notch-monitor.sock';
 const DEBUG_LOGS_ENABLED = process.env.NOTCH_MONITOR_DEBUG === '1';
@@ -64,13 +63,17 @@ class NotchMonitorServer {
 
         server.listen(SOCKET_PATH, () => {
             console.log(`Server listening on ${SOCKET_PATH}`);
-            // 设置 socket 文件权限
-            fs.chmodSync(SOCKET_PATH, 0o777);
+            // 使用更严格的权限设置
+            fs.chmodSync(SOCKET_PATH, 0o700);
         });
-
     }
 
     handleMessage(message, socket) {
+        if (!isValidMessage(message)) {
+            console.warn('Invalid message format:', message);
+            return;
+        }
+
         switch (message.type) {
             case 'agent_register':
                 this.registerAgent(message.data);
@@ -162,8 +165,16 @@ class NotchMonitorServer {
     }
 
     broadcast(message) {
-        this.clients.forEach(client => {
+        // 优化 broadcast 方法，确保只向活跃连接发送消息并清理无效连接
+        const activeClients = Array.from(this.clients).filter(client => client.writable);
+        activeClients.forEach(client => {
             this.send(client, message);
+        });
+        // 清理无效连接
+        const inactiveClients = Array.from(this.clients).filter(client => !client.writable);
+        inactiveClients.forEach(client => {
+            this.clients.delete(client);
+            client.destroy();
         });
     }
 
@@ -178,6 +189,22 @@ function generateId() {
     return Math.random().toString(36).substring(2, 15);
 }
 
+function isValidMessage(message) {
+    return message &&
+           typeof message === 'object' &&
+           typeof message.type === 'string' &&
+           (message.data === undefined || typeof message.data === 'object');
+}
+
+/**
+ * 清理本地 socket 文件，避免 bridge 重启时被旧文件阻塞。
+ */
+function cleanupSocketFile() {
+    if (fs.existsSync(SOCKET_PATH)) {
+        fs.unlinkSync(SOCKET_PATH);
+    }
+}
+
 // 启动服务器
 const server = new NotchMonitorServer();
 server.start();
@@ -185,8 +212,11 @@ server.start();
 // 优雅退出
 process.on('SIGINT', () => {
     console.log('\nShutting down...');
-    if (fs.existsSync(SOCKET_PATH)) {
-        fs.unlinkSync(SOCKET_PATH);
-    }
+    cleanupSocketFile();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    cleanupSocketFile();
     process.exit(0);
 });

@@ -38,7 +38,10 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
-function filterManagedEntries(entries, command) {
+/**
+ * 移除由 Open Island 管理的旧 hook，避免重复注入或遗留失效命令。
+ */
+function stripManagedEntries(entries) {
   return (entries || []).filter((entry) => {
     if (typeof entry === 'string') {
       return !entry.includes('bridge/hook.js') && !entry.includes('.vibe-island/bin/vibe-island-bridge');
@@ -51,8 +54,16 @@ function filterManagedEntries(entries, command) {
       return !hookCommand.includes('bridge/hook.js') && !hookCommand.includes('.vibe-island/bin/vibe-island-bridge');
     });
 
+    if (nextHooks.length === entry.hooks.length) {
+      return true;
+    }
+
+    if (nextHooks.length === 0) {
+      return false;
+    }
+
     entry.hooks = nextHooks;
-    return nextHooks.length > 0;
+    return true;
   });
 }
 
@@ -77,7 +88,7 @@ function installClaudeHooks() {
   }
 
   for (const [eventName, entries] of Object.entries(settings.hooks)) {
-    settings.hooks[eventName] = filterManagedEntries(entries, claudeCommand);
+    settings.hooks[eventName] = stripManagedEntries(entries);
   }
 
   for (const eventName of matcherEvents) {
@@ -94,6 +105,9 @@ function installClaudeHooks() {
   writeJson(claudeSettingsPath, settings);
 }
 
+/**
+ * 只有在显式开启 Codex bridge hooks 时才写入 codex_hooks feature，避免修改无关用户配置。
+ */
 function ensureCodexHooksFeature() {
   ensureDir(codexConfigPath);
   const content = fs.existsSync(codexConfigPath) ? fs.readFileSync(codexConfigPath, 'utf8') : '';
@@ -114,12 +128,15 @@ function ensureCodexHooksFeature() {
   fs.writeFileSync(codexConfigPath, `${nextContent.endsWith('\n') ? nextContent : `${nextContent}\n`}`);
 }
 
+/**
+ * 安装或清理 Codex hooks。默认保留 wrapper 监控，只有显式 opt-in 才注入 bridge hooks。
+ */
 function installCodexHooks() {
   const config = readJson(codexHooksPath, { hooks: {} });
   config.hooks = config.hooks || {};
 
   for (const [eventName, entries] of Object.entries(config.hooks)) {
-    const filteredEntries = filterManagedEntries(entries, codexCommand);
+    const filteredEntries = stripManagedEntries(entries);
     if (filteredEntries.length > 0) {
       config.hooks[eventName] = filteredEntries;
     } else {
@@ -143,12 +160,14 @@ function main() {
   installClaudeHooks();
   console.log('Installed NotchMonitor hooks for Claude');
 
-  ensureCodexHooksFeature();
+  if (installCodexBridgeHooks) {
+    ensureCodexHooksFeature();
+  }
   installCodexHooks();
   console.log(
     installCodexBridgeHooks
       ? 'Installed NotchMonitor hooks for Codex'
-      : 'Disabled NotchMonitor Codex hooks to keep Codex terminal output clean'
+      : 'Kept Codex bridge hooks disabled by default; wrapper-based session monitoring remains enabled'
   );
 }
 

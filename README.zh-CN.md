@@ -15,8 +15,9 @@ Open Island 是一个 macOS 菜单栏应用，适合同时运行多个本地编�
 ## 特性
 
 - 实时显示 Claude Code 和 Codex 的会话状态
-- 在面板中展示支持的权限请求
+- 在面板中展示当前支持的权限请求
 - 一键跳回对应的终端或 IDE
+- 在能够安全匹配目标 tty 时，直接处理 Terminal.app 的编号交互选项
 - 轻量本地 macOS 应用，配合小型 bridge 进程运行
 
 ## 展示
@@ -64,16 +65,29 @@ CLI 编码 Agent 很强，但一旦你同时开着 Terminal、iTerm、Claude Cod
 - Claude Code
 - Codex
 
+当前支持边界：
+
+- Claude Code hooks 会自动安装
+- Codex 默认通过本地 wrapper 提供会话监控
+- Codex bridge hooks 默认关闭，需要显式设置 `NOTCH_MONITOR_ENABLE_CODEX_HOOKS=1`
+- 面板内直接选择交互式选项，目前只在能够安全匹配 tty 的 Terminal.app 会话中启用
+
+已识别但尚未作为一等支持的类型：
+
+- 当前代码里仍保留了对 `Cursor`、`Gemini`、`OpenCode` 的启发式识别和 UI 模型类型
+- 这些类型目前更偏向兼容性保留或后续扩展预留，并不代表它们已经具备与 Claude Code、Codex 完全一致的端到端支持
+- 文档、安装流程、权限处理和内联交互能力，如无额外说明，均应以 Claude Code 和 Codex 的一等支持范围为准
+
 代码结构已经为后续接入更多本地 Agent 留了空间，但目前的一等公民工作流仍然聚焦在 Claude Code 和 Codex。
 
 ## 状态
 
-Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal、iTerm、Claude Code 和 Codex 为核心的使用场景。它仍然是 early preview，但核心闭环已经存在：会话监控、面板渲染、权限提示以及基础跳转能力都已经可用。
+Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal、iTerm、Claude Code 和 Codex 为核心的使用场景。它仍然是 early preview，但核心闭环已经存在：会话监控、面板渲染、当前支持的权限提示以及基础跳转能力都已经可用。
 
 目前表现较好的部分：
 
 - 个人和本地开发者工作流
-- bridge、面板渲染和支持的权限流程
+- bridge、面板渲染、Claude 权限流程，以及通过 wrapper 提供的 Codex 会话监控
 - Terminal 和 iTerm 的跳转体验
 
 当前已知粗糙点：
@@ -81,6 +95,7 @@ Open Island 已经可以用于本地 macOS 工作流，尤其适合以 Terminal�
 - JetBrains 内置终端跳转仍然存在边界情况
 - JetBrains 同项目多窗口的精确跳转还不稳定
 - 部分交互依赖 macOS Accessibility 和 AppleScript 的稳定性
+- 面板内交互式选项目前刻意限制在可安全匹配 tty 的 Terminal.app 会话
 
 近期重点：
 
@@ -161,7 +176,7 @@ Open Island 依赖 macOS Accessibility 来完成窗口激活、终端跳转和�
 2. 正常启动 Claude Code 或 Codex
 3. 观察 notch panel 中实时出现的会话
 4. 点击某个会话，跳回它所属的终端或 IDE
-5. 在面板中查看和处理支持的权限请求
+5. 在面板中查看和处理支持的权限请求，以及 Terminal.app 的内联交互选项
 
 ## 项目结构
 
@@ -254,6 +269,10 @@ tail -n 200 /tmp/notch-monitor-codex-wrapper.log
 ### 支持远程 Agent 或云端会话吗？
 
 目前不支持。当前设计目标是单台 Mac 上的本地开发者工作流。
+
+### Codex hooks 会自动开启吗？
+
+不会。Open Island 会自动安装 Codex wrapper 来做会话监控，但 Codex bridge hooks 默认保持关闭。如果你希望把 Codex hook 事件也接入 bridge，需要先设置 `NOTCH_MONITOR_ENABLE_CODEX_HOOKS=1`，再重新执行安装器。
 
 ### 为什么 JetBrains 的跳转不如 Terminal / iTerm 稳定？
 
