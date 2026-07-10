@@ -791,6 +791,7 @@ struct CompactAgentRow: View {
         if raw.contains("warp") { return "Warp" }
         if raw.contains("cursor") { return "Cursor" }
         if raw.contains("vscode") || raw.contains("visual studio code") || raw == "code" { return "VS Code" }
+        if raw.contains("jetbrains") || raw.contains("jediterm") { return "JetBrains" }
         if raw.contains("pycharm") { return "PyCharm" }
         if raw.contains("idea") { return "IDEA" }
         return "Shell"
@@ -856,8 +857,9 @@ struct CompactAgentRow: View {
     }
 
     func submitInteractiveOption(_ option: InteractiveOption, for agent: Agent) {
-        SocketService.shared.clearInteractivePrompt(agentId: agent.id)
-        TerminalPromptService.submit(option: option, to: agent)
+        if TerminalPromptService.submit(option: option, to: agent) {
+            SocketService.shared.clearInteractivePrompt(agentId: agent.id)
+        }
     }
 }
 

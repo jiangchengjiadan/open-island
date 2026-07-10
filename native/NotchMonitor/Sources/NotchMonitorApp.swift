@@ -19,6 +19,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var mouseMonitor: Any?
     var localMouseMonitor: Any?
     var permissionAttentionObserver: AnyCancellable?
+    var keepAwakeObserver: AnyCancellable?
+    var keepAwakeStateObserver: AnyCancellable?
     var bootstrapObserver: AnyCancellable?
     var onboardingObserver: AnyCancellable?
     var socketStartObserver: AnyCancellable?
@@ -50,6 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 等 bridge 起稳后再接 socket，避免 DMG 首启时 process fallback 和 socket 注册打架
         scheduleSocketStartup()
         observePermissionAttention()
+        observeKeepAwakeState()
         observeBootstrapState()
         observeOnboardingState()
 
@@ -100,11 +103,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func cleanup() {
         AppBootstrapService.shared.stop()
+        PowerAssertionService.shared.disableForShutdown()
         Task { @MainActor in
             UsageStore.shared.stopAutoRefresh()
         }
         permissionAttentionObserver?.cancel()
         permissionAttentionObserver = nil
+        keepAwakeObserver?.cancel()
+        keepAwakeObserver = nil
+        keepAwakeStateObserver?.cancel()
+        keepAwakeStateObserver = nil
         bootstrapObserver?.cancel()
         bootstrapObserver = nil
         onboardingObserver?.cancel()
@@ -140,6 +148,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.hadPendingPermission = hasPendingPermission
             }
+    }
+
+    func observeKeepAwakeState() {
+        keepAwakeObserver?.cancel()
+        keepAwakeObserver = SocketService.shared.$agents
+            .receive(on: RunLoop.main)
+            .sink { agents in
+                PowerAssertionService.shared.reevaluate(with: agents)
+            }
+
+        keepAwakeStateObserver?.cancel()
+        keepAwakeStateObserver = Publishers.CombineLatest3(
+            PowerAssertionService.shared.$isKeepingAwake,
+            PowerAssertionService.shared.$isPausedForPower,
+            PowerAssertionService.shared.$isEnabled
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _, _, _ in
+            self?.panelWindow?.refreshCollapsedSummary()
+        }
     }
 
     func observeBootstrapState() {

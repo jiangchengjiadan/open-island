@@ -12,6 +12,7 @@ const geminiSettingsPath = path.join(process.env.HOME, '.gemini', 'settings.json
 const qoderSettingsPath = path.join(process.env.HOME, '.qoder', 'settings.json');
 const codexConfigPath = path.join(process.env.HOME, '.codex', 'config.toml');
 const codexHooksPath = path.join(process.env.HOME, '.codex', 'hooks.json');
+const installCodexBridgeHooks = process.env.NOTCH_MONITOR_ENABLE_CODEX_HOOKS === '1';
 
 const claudeCommand = `${nodePath} ${hookScript} event claude`;
 const cursorCommand = `${nodePath} ${hookScript} event cursor`;
@@ -264,6 +265,13 @@ function installCodexHooks() {
     }
   }
 
+  if (!installCodexBridgeHooks) {
+    backupFile(codexHooksPath);
+    writeJson(codexHooksPath, config);
+    logHookSummary('Codex', codexEvents, config.hooks, countManagedHookEntries);
+    return;
+  }
+
   for (const eventName of codexEvents) {
     config.hooks[eventName] = config.hooks[eventName] || [];
     const needsMatcher = codexMatcherEvents.includes(eventName);
@@ -289,9 +297,15 @@ function main() {
   installQoderHooks();
   console.log('Installed NotchMonitor hooks for Qoder');
 
-  ensureCodexHooksFeature();
+  if (installCodexBridgeHooks) {
+    ensureCodexHooksFeature();
+  }
   installCodexHooks();
-  console.log('Installed NotchMonitor hooks for Codex');
+  console.log(
+    installCodexBridgeHooks
+      ? 'Installed NotchMonitor hooks for Codex'
+      : 'Kept Codex bridge hooks disabled by default; wrapper-based session monitoring remains enabled'
+  );
 }
 
 main();

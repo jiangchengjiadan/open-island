@@ -481,6 +481,74 @@ function permissionOutput(source, eventName, allowed) {
   return getIntegration(source).permissionOutput(eventName, allowed);
 }
 
+function legacyAgentId(agentType) {
+  const tty = slug(ttyOf() || terminalOf(), "terminal");
+  const cwd = slug(process.cwd(), "cwd");
+  return `${agentType}:legacy:${tty}:${cwd}`;
+}
+
+function legacyAgentName(agentType, agentName = "") {
+  if (typeof agentName === "string" && agentName.trim() !== "") {
+    return agentName.trim();
+  }
+
+  if (
+    typeof process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME === "string" &&
+    process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME.trim() !== ""
+  ) {
+    return process.env.NOTCH_MONITOR_LEGACY_AGENT_NAME.trim();
+  }
+
+  return `${agentType}-session`;
+}
+
+function legacyAgentPayload(agentId, agentName, agentType, status, currentTask) {
+  return {
+    id: agentId,
+    name: agentName,
+    type: agentType,
+    status,
+    terminal: ttyOf(),
+    terminalApp: terminalOf(),
+    tty: ttyOf(),
+    cwd: process.cwd(),
+    pid: process.ppid,
+    terminalTitleToken: ttyDevicePath() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
+    parentPid: processInfoOf(process.ppid)?.ppid || null,
+    parentCommand: processInfoOf(process.ppid)?.command || null,
+    processChain: processChainOf(process.ppid),
+    environmentHints: collectEnvHints(),
+    jetbrainsContext: collectJetBrainsContext(),
+    currentTask,
+    lastUpdate: Date.now(),
+  };
+}
+
+function registerLegacyCleanup(client) {
+  let didCleanup = false;
+
+  const cleanup = () => {
+    if (didCleanup) {
+      return;
+    }
+    didCleanup = true;
+    client.unregister();
+    client.close();
+  };
+
+  process.once("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  process.once("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  process.once("exit", cleanup);
+}
+
 class BridgeClient {
   constructor(agentId) {
     this.agentId = agentId;
@@ -658,63 +726,24 @@ async function runEventHook(source) {
 }
 
 async function runLegacyRegister(agentName, agentType = 'claude') {
-  const agentId = `${agentType}:${slug(agentName)}:${Date.now()}`;
+  const resolvedName = legacyAgentName(agentType, agentName);
+  const agentId = legacyAgentId(agentType);
   const client = new BridgeClient(agentId);
   await client.connect();
   client.send({
     type: 'agent_register',
-    data: {
-      id: agentId,
-      name: agentName,
-      type: agentType,
-      status: 'running',
-      terminal: ttyOf(),
-      terminalApp: terminalOf(),
-      tty: ttyOf(),
-      cwd: process.cwd(),
-      pid: process.ppid,
-      terminalTitleToken: ttyDevicePath() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
-      parentPid: processInfoOf(process.ppid)?.ppid || null,
-      parentCommand: processInfoOf(process.ppid)?.command || null,
-      processChain: processChainOf(process.ppid),
-      environmentHints: collectEnvHints(),
-      jetbrainsContext: collectJetBrainsContext(),
-      currentTask: 'Session started',
-      lastUpdate: Date.now(),
-    },
+    data: legacyAgentPayload(agentId, resolvedName, agentType, 'running', 'Session started'),
   });
-  process.on('SIGINT', () => {
-    client.unregister();
-    client.close();
-    process.exit(0);
-  });
+  registerLegacyCleanup(client);
 }
 
 async function runLegacyUpdate(status, currentTask, agentType = 'claude') {
-  const agentId = `${agentType}:${Date.now()}`;
+  const agentId = legacyAgentId(agentType);
   const client = new BridgeClient(agentId);
   await client.connect();
   client.send({
     type: 'agent_update',
-    data: {
-      id: agentId,
-      name: `${agentType}-session`,
-      type: agentType,
-      status,
-      terminal: ttyOf(),
-      terminalApp: terminalOf(),
-      tty: ttyOf(),
-      cwd: process.cwd(),
-      pid: process.ppid,
-      terminalTitleToken: ttyDevicePath() ? terminalTitleTokenFor(agentType, process.ppid, agentId) : null,
-      parentPid: processInfoOf(process.ppid)?.ppid || null,
-      parentCommand: processInfoOf(process.ppid)?.command || null,
-      processChain: processChainOf(process.ppid),
-      environmentHints: collectEnvHints(),
-      jetbrainsContext: collectJetBrainsContext(),
-      currentTask,
-      lastUpdate: Date.now(),
-    },
+    data: legacyAgentPayload(agentId, `${agentType}-session`, agentType, status, currentTask),
   });
   client.close();
 }

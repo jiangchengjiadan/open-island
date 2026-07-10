@@ -3,15 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-function resolveRepoRoot() {
-  const sourceRepoRoot = path.resolve(__dirname, '..', '..', '..', '..', '..');
-  if (fs.existsSync(path.join(sourceRepoRoot, 'bridge', 'hook.js'))) {
-    return sourceRepoRoot;
-  }
-  return path.resolve(__dirname, '..');
-}
-
-const repoRoot = resolveRepoRoot();
+const repoRoot = path.resolve(__dirname, '..');
 const nodePath = process.execPath;
 const hookScript = path.join(repoRoot, 'bridge', 'hook.js');
 const claudeSettingsPath = path.join(process.env.HOME, '.claude', 'settings.json');
@@ -20,6 +12,7 @@ const geminiSettingsPath = path.join(process.env.HOME, '.gemini', 'settings.json
 const qoderSettingsPath = path.join(process.env.HOME, '.qoder', 'settings.json');
 const codexConfigPath = path.join(process.env.HOME, '.codex', 'config.toml');
 const codexHooksPath = path.join(process.env.HOME, '.codex', 'hooks.json');
+const installCodexBridgeHooks = process.env.NOTCH_MONITOR_ENABLE_CODEX_HOOKS === '1';
 
 const claudeCommand = `${nodePath} ${hookScript} event claude`;
 const cursorCommand = `${nodePath} ${hookScript} event cursor`;
@@ -272,6 +265,13 @@ function installCodexHooks() {
     }
   }
 
+  if (!installCodexBridgeHooks) {
+    backupFile(codexHooksPath);
+    writeJson(codexHooksPath, config);
+    logHookSummary('Codex', codexEvents, config.hooks, countManagedHookEntries);
+    return;
+  }
+
   for (const eventName of codexEvents) {
     config.hooks[eventName] = config.hooks[eventName] || [];
     const needsMatcher = codexMatcherEvents.includes(eventName);
@@ -297,9 +297,15 @@ function main() {
   installQoderHooks();
   console.log('Installed NotchMonitor hooks for Qoder');
 
-  ensureCodexHooksFeature();
+  if (installCodexBridgeHooks) {
+    ensureCodexHooksFeature();
+  }
   installCodexHooks();
-  console.log('Installed NotchMonitor hooks for Codex');
+  console.log(
+    installCodexBridgeHooks
+      ? 'Installed NotchMonitor hooks for Codex'
+      : 'Kept Codex bridge hooks disabled by default; wrapper-based session monitoring remains enabled'
+  );
 }
 
 main();

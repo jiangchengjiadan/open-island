@@ -594,8 +594,8 @@ class SocketService: ObservableObject {
     private func shouldInspectInteractivePrompt(agent: Agent) -> Bool {
         guard !agent.needsPermission else { return false }
         guard protocolInteractivePromptIDs[agent.id] == nil else { return false }
-        guard let terminalApp = agent.terminalApp?.lowercased(), terminalApp.contains("terminal") else { return false }
         guard let tty = agent.tty, !tty.isEmpty else { return false }
+        guard TerminalPromptService.supportsInlinePrompt(for: agent) else { return false }
         return agent.status == .waiting || agent.type == .codex
     }
 

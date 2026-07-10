@@ -70,8 +70,8 @@ class NotchMonitorServer {
 
         server.listen(SOCKET_PATH, () => {
             console.log(`Server listening on ${SOCKET_PATH}`);
-            // 设置 socket 文件权限
-            fs.chmodSync(SOCKET_PATH, 0o777);
+            // 限制为当前用户可访问，避免本机其他用户误连本地 bridge。
+            fs.chmodSync(SOCKET_PATH, 0o700);
         });
 
         this.cleanupTimer = setInterval(() => {
@@ -117,6 +117,12 @@ class NotchMonitorServer {
             tty: data.tty || data.terminal || null,
             cwd: data.cwd || null,
             pid: data.pid || null,
+            terminalTitleToken: data.terminalTitleToken || null,
+            parentPid: data.parentPid || null,
+            parentCommand: data.parentCommand || null,
+            processChain: data.processChain || null,
+            environmentHints: data.environmentHints || null,
+            jetbrainsContext: data.jetbrainsContext || null,
             currentTask: data.currentTask,
             lastUpdate: Date.now(),
             needsPermission: false

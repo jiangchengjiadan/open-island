@@ -1,0 +1,10 @@
+- [x] 已完成 bridge、hook、wrapper、native 服务主链路审查并形成问题清单
+- [x] 同名但不同 tty / pid / cwd 的活跃会话不会被错误隐藏或错误合并
+- [x] 历史兼容 register / update 入口不会制造重复会话或悬空状态
+- [x] 交互式 prompt 仅在真实支持的平台和终端上暴露操作入口
+- [x] 交互式 prompt 的输入提交会命中正确会话，无法确认目标时不会盲发输入
+- [x] 权限审批能力的实现、安装策略、UI 展示与文档描述保持一致
+- [x] Codex、Claude、Gemini、Cursor、OpenCode 的支持范围在代码和文档中表述一致
+- [x] Terminal、iTerm、JetBrains 跳转行为与 README 中的说明一致
+- [x] 明显未使用、误导性或历史残留代码已被清理或明确标注用途
+- [x] 安装、自检、onboarding、keep awake 的文案与真实行为一致

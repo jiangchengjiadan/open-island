@@ -4,47 +4,81 @@ import AppKit
 enum TerminalPromptService {
     private static let logURL = URL(fileURLWithPath: "/tmp/notch-monitor-interactive.log")
 
+    private struct PromptRoutingTarget {
+        let ttyCandidates: [String]
+        let terminalLabel: String
+    }
+
+    /// 判断当前 agent 是否具备安全的内联 prompt 检测与提交条件。
+    static func supportsInlinePrompt(for agent: Agent) -> Bool {
+        promptRoutingTarget(for: agent, logFailures: false) != nil
+    }
+
+    /// 读取目标会话的终端内容，并在确认可安全路由时解析交互式 prompt。
     static func detectPrompt(for agent: Agent) -> InteractivePrompt? {
-        guard isTerminalApp(agent.terminalApp), let ttyHint = normalizedTTYHint(from: agent) else {
+        guard let target = promptRoutingTarget(for: agent, logFailures: true) else {
             return nil
         }
 
-        let ttyCandidates = ttyHint.candidates
-        let contents = fetchTerminalContents(ttyCandidates: ttyCandidates).trimmingCharacters(in: .whitespacesAndNewlines)
+        let contents = fetchTerminalContents(for: target).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !contents.isEmpty else {
+            log("prompt detection skipped agent=\(agent.id) reason=no-terminal-contents tty=\(target.ttyCandidates.joined(separator: ","))")
             return nil
         }
 
         let prompt = parsePrompt(from: contents, agentId: agent.id)
         if let prompt {
-            log("detected prompt agent=\(agent.id) title=\(prompt.title) options=\(prompt.options.count)")
+            log("detected prompt agent=\(agent.id) title=\(prompt.title) options=\(prompt.options.count) terminal=\(target.terminalLabel)")
         }
         return prompt
     }
 
-    static func submit(option: InteractiveOption, to agent: Agent) {
-        TerminalJumpService.jumpSynchronously(to: agent)
+    /// 将选项提交到精确匹配的 Terminal 会话；如果无法定位目标 tab，则直接失败而不发送按键。
+    @discardableResult
+    static func submit(option: InteractiveOption, to agent: Agent) -> Bool {
+        guard let target = promptRoutingTarget(for: agent, logFailures: true) else {
+            log("submit blocked agent=\(agent.id) value=\(option.value) reason=unsupported-routing-target")
+            return false
+        }
 
-        let escapedValue = appleScriptString(option.value)
-        let script = """
-        tell application "System Events"
-            tell process "Terminal"
-                keystroke \(escapedValue)
-                delay 0.05
-                key code 36
-            end tell
-        end tell
-        return "ok"
-        """
-
-        let result = run(script: script, target: "TerminalSelection")
-        log("submitted option agent=\(agent.id) value=\(option.value) result=\(result ?? "nil")")
+        let result = submitOption(option.value, to: target)
+        log("submitted option agent=\(agent.id) value=\(option.value) result=\(result ? "ok" : "blocked") terminal=\(target.terminalLabel)")
+        return result
     }
 
-    private static func isTerminalApp(_ terminalApp: String?) -> Bool {
-        (terminalApp ?? "").lowercased().contains("terminal")
+    /// 为当前 agent 解析唯一且可安全操作的 Terminal 路由目标。
+    private static func promptRoutingTarget(for agent: Agent, logFailures: Bool) -> PromptRoutingTarget? {
+        guard isSupportedTerminalApp(agent.terminalApp) else {
+            if logFailures {
+                log("prompt routing unsupported agent=\(agent.id) terminalApp=\(agent.terminalApp ?? "nil")")
+            }
+            return nil
+        }
+
+        guard let ttyHint = normalizedTTYHint(from: agent) else {
+            if logFailures {
+                log("prompt routing unsupported agent=\(agent.id) reason=missing-tty terminalApp=\(agent.terminalApp ?? "nil")")
+            }
+            return nil
+        }
+
+        return PromptRoutingTarget(
+            ttyCandidates: ttyHint.candidates,
+            terminalLabel: agent.terminalApp?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Terminal"
+        )
     }
 
+    /// 当前真实支持的内联 prompt 仅限 macOS Terminal.app 及其常见环境标识。
+    private static func isSupportedTerminalApp(_ terminalApp: String?) -> Bool {
+        let raw = (terminalApp ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !raw.isEmpty else { return false }
+        if raw.contains("iterm") || raw.contains("ghostty") || raw.contains("warp") || raw.contains("jetbrains") || raw.contains("jediterm") {
+            return false
+        }
+        return raw == "terminal" || raw == "apple_terminal" || raw.contains("apple_terminal")
+    }
+
+    /// 从 agent 中提取标准化 tty 候选集合，用于精确命中 Terminal tab。
     private static func normalizedTTYHint(from agent: Agent) -> (primary: String, candidates: [String])? {
         let raw = (agent.tty ?? agent.terminal).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
@@ -61,24 +95,28 @@ enum TerminalPromptService {
         return (raw, ordered)
     }
 
-    private static func fetchTerminalContents(ttyCandidates: [String]) -> String {
-        let ttyList = "{\(ttyCandidates.map(appleScriptString).joined(separator: ", "))}"
+    /// 读取精确 tty 所在 Terminal tab 的内容，避免误读当前选中但不属于目标会话的窗口。
+    private static func fetchTerminalContents(for target: PromptRoutingTarget) -> String {
+        let ttyList = "{\(target.ttyCandidates.map(appleScriptString).joined(separator: ", "))}"
         let script = """
         tell application "Terminal"
             repeat with targetTTY in \(ttyList)
                 set targetTTYValue to contents of targetTTY
                 repeat with theWindow in windows
                     set windowRef to contents of theWindow
-                    try
-                        set tabTTY to tty of selected tab of windowRef
-                        set normalizedTTY to tabTTY
-                        if normalizedTTY starts with "/dev/" then
-                            set normalizedTTY to text 6 thru -1 of normalizedTTY
-                        end if
-                        if tabTTY is targetTTYValue or normalizedTTY is targetTTYValue then
-                            return contents of selected tab of windowRef
-                        end if
-                    end try
+                    repeat with tabIndex from 1 to count of tabs of windowRef
+                        try
+                            set tabRef to tab tabIndex of windowRef
+                            set tabTTY to tty of tabRef
+                            set normalizedTTY to tabTTY
+                            if normalizedTTY starts with "/dev/" then
+                                set normalizedTTY to text 6 thru -1 of normalizedTTY
+                            end if
+                            if tabTTY is targetTTYValue or normalizedTTY is targetTTYValue then
+                                return contents of tabRef
+                            end if
+                        end try
+                    end repeat
                 end repeat
             end repeat
         end tell
@@ -88,6 +126,66 @@ enum TerminalPromptService {
         return run(script: script, target: "TerminalContents") ?? ""
     }
 
+    /// 仅在精确匹配到目标 tty 所在 tab 后才发送选项输入，避免误发到错误终端。
+    private static func submitOption(_ value: String, to target: PromptRoutingTarget) -> Bool {
+        let ttyList = "{\(target.ttyCandidates.map(appleScriptString).joined(separator: ", "))}"
+        let escapedValue = appleScriptString(value)
+        let script = """
+        set matchedWindowIndex to -1
+        set matchedTabIndex to -1
+        tell application "Terminal"
+            repeat with targetTTY in \(ttyList)
+                set targetTTYValue to contents of targetTTY
+                repeat with windowIndex from 1 to count of windows
+                    set windowRef to window windowIndex
+                    repeat with tabIndex from 1 to count of tabs of windowRef
+                        try
+                            set tabRef to tab tabIndex of windowRef
+                            set tabTTY to tty of tabRef
+                            set normalizedTTY to tabTTY
+                            if normalizedTTY starts with "/dev/" then
+                                set normalizedTTY to text 6 thru -1 of normalizedTTY
+                            end if
+                            if tabTTY is targetTTYValue or normalizedTTY is targetTTYValue then
+                                set matchedWindowIndex to windowIndex
+                                set matchedTabIndex to tabIndex
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                    if matchedWindowIndex is not -1 then exit repeat
+                end repeat
+                if matchedWindowIndex is not -1 then exit repeat
+            end repeat
+
+            if matchedWindowIndex is not -1 and matchedTabIndex is not -1 then
+                activate
+                set targetWindow to window matchedWindowIndex
+                set selected tab of targetWindow to tab matchedTabIndex of targetWindow
+                set index of targetWindow to 1
+            end if
+        end tell
+
+        if matchedWindowIndex is -1 or matchedTabIndex is -1 then
+            return "miss"
+        end if
+
+        tell application "System Events"
+            tell process "Terminal"
+                set frontmost to true
+                delay 0.05
+                keystroke \(escapedValue)
+                delay 0.05
+                key code 36
+            end tell
+        end tell
+        return "ok"
+        """
+
+        return run(script: script, target: "TerminalSubmit") == "ok"
+    }
+
+    /// 从终端内容中提取可展示的编号选项 prompt。
     private static func parsePrompt(from contents: String, agentId: String) -> InteractivePrompt? {
         let lines = contents
             .components(separatedBy: .newlines)
@@ -165,6 +263,7 @@ enum TerminalPromptService {
         )
     }
 
+    /// 选择最接近选项组的上一行文本作为 prompt 标题。
     private static func promptTitle(from lines: [String], before firstOptionIndex: Int) -> String {
         guard firstOptionIndex > 0 else { return "Action Required" }
 
@@ -178,6 +277,7 @@ enum TerminalPromptService {
         return "Action Required"
     }
 
+    /// 清理提示标题中的无关符号和明显错误信息。
     private static func cleanedPromptTitle(_ line: String) -> String {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -193,6 +293,7 @@ enum TerminalPromptService {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 执行 AppleScript，并把失败细节落到交互日志中。
     private static func run(script: String, target: String) -> String? {
         var error: NSDictionary?
         let appleScript = NSAppleScript(source: script)
@@ -205,10 +306,12 @@ enum TerminalPromptService {
         return result?.stringValue
     }
 
+    /// 对插入 AppleScript 的字符串做最小必要转义。
     private static func appleScriptString(_ string: String) -> String {
         "\"\(string.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 
+    /// 追加写入交互 prompt 诊断日志。
     private static func log(_ message: String) {
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
         if let data = line.data(using: .utf8) {
