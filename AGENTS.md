@@ -37,6 +37,12 @@ There are no automated test targets in this snapshot. For changes:
 
 If you add tests, place Swift tests under `native/NotchMonitor/Tests/` and JavaScript tests under `bridge/tests/`.
 
+## Open Island Implementation Notes
+- Runtime bridge scripts exist in two places: `bridge/` for source development and `native/NotchMonitor/Sources/AppRuntime/bridge/` for packaged app runtime. Keep matching behavior in sync when editing `server.js`, `hook.js`, or `codex-wrapper.js`.
+- Permission approval behavior spans Swift UI, `SocketService.swift`, `bridge/server.js`, and `bridge/hook.js`; update the full path together so the island display, socket protocol, and agent hook output remain consistent.
+- The notch panel window height is calculated both in SwiftUI (`NotchPanelView`) and AppKit (`NotchPanelWindow`). When adding visible row content such as approval bars or prompt controls, update both height calculations so controls are not clipped.
+- For permission auto-approval features, prefer conservative session-scoped matching in the bridge layer. Avoid broad command-family approval unless the rule is explicit and low risk.
+
 ## Commit & Pull Request Guidelines
 Git history is not available in this workspace snapshot, so use a simple conventional pattern: imperative, scoped commit subjects such as `bridge: handle stale socket cleanup` or `native: refine panel hover behavior`.
 

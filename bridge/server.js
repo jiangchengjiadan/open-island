@@ -3,6 +3,10 @@ const fs = require('fs');
 
 const SOCKET_PATH = '/tmp/notch-monitor.sock';
 const DEBUG_LOGS_ENABLED = process.env.NOTCH_MONITOR_DEBUG === '1';
+const CLEANUP_INTERVAL_MS = 15_000;
+const COMPLETED_AGENT_TTL_MS = 60_000;
+const DEAD_PID_GRACE_MS = 30_000;
+const MISSING_PID_AGENT_TTL_MS = 10 * 60_000;
 
 function debugLog(...args) {
     if (DEBUG_LOGS_ENABLED) {
@@ -14,6 +18,9 @@ class NotchMonitorServer {
     constructor() {
         this.clients = new Set();
         this.agents = new Map();
+        this.sessionPermissionGrants = new Map();
+        this.pendingPermissionQueues = new Map();
+        this.cleanupTimer = null;
     }
 
     start() {
@@ -63,17 +70,21 @@ class NotchMonitorServer {
 
         server.listen(SOCKET_PATH, () => {
             console.log(`Server listening on ${SOCKET_PATH}`);
-            // 使用更严格的权限设置
+            // 限制为当前用户可访问，避免本机其他用户误连本地 bridge。
             fs.chmodSync(SOCKET_PATH, 0o700);
         });
+
+        this.cleanupTimer = setInterval(() => {
+            this.cleanupStaleAgents();
+        }, CLEANUP_INTERVAL_MS);
+
+        if (typeof this.cleanupTimer.unref === 'function') {
+            this.cleanupTimer.unref();
+        }
+
     }
 
     handleMessage(message, socket) {
-        if (!isValidMessage(message)) {
-            console.warn('Invalid message format:', message);
-            return;
-        }
-
         switch (message.type) {
             case 'agent_register':
                 this.registerAgent(message.data);
@@ -135,26 +146,78 @@ class NotchMonitorServer {
     unregisterAgent(id) {
         if (this.agents.has(id)) {
             this.agents.delete(id);
+            this.sessionPermissionGrants.delete(id);
+            this.pendingPermissionQueues.delete(id);
             this.broadcast({ type: 'agent_unregistered', data: { id } });
         }
     }
 
     broadcastPermissionRequest(data) {
+        const request = data.request || {};
+        const permissionKey = request.permissionKey || permissionKeyForRequest(request);
+        if (permissionKey) {
+            request.permissionKey = permissionKey;
+            data.request = request;
+        }
+
+        if (this.hasSessionGrant(data.agentId, permissionKey)) {
+            this.forwardPermissionResponse({
+                agentId: data.agentId,
+                requestId: request.id,
+                allowed: true,
+                scope: 'session_similar',
+                permissionKey,
+                autoApproved: true
+            });
+            return;
+        }
+
         const agent = this.agents.get(data.agentId);
         if (agent) {
-            agent.needsPermission = true;
-            agent.permissionRequest = data.request;
-            this.broadcast({ type: 'permission_requested', data });
+            if (agent.needsPermission && agent.permissionRequest) {
+                this.enqueuePermissionRequest(data.agentId, request);
+                debugLog(`Queued permission request agent=${data.agentId} request=${request.id}`);
+                return;
+            }
+
+            this.presentPermissionRequest(data.agentId, request);
         }
     }
 
     forwardPermissionResponse(data) {
         const agent = this.agents.get(data.agentId);
+        const permissionKey = data.permissionKey || agent?.permissionRequest?.permissionKey || null;
+        const scope = data.scope || 'once';
+
+        if (data.allowed && scope === 'session_similar' && permissionKey) {
+            this.addSessionGrant(data.agentId, permissionKey);
+            data.permissionKey = permissionKey;
+        }
+
         if (agent) {
             agent.needsPermission = false;
             agent.permissionRequest = null;
         }
+        this.broadcast({
+            type: 'interaction_responded',
+            data: buildPermissionInteractionResponse(data, permissionKey)
+        });
         this.broadcast({ type: 'permission_responded', data });
+
+        this.presentNextQueuedPermission(data.agentId);
+    }
+
+    addSessionGrant(agentId, permissionKey) {
+        if (!agentId || !permissionKey) return;
+        if (!this.sessionPermissionGrants.has(agentId)) {
+            this.sessionPermissionGrants.set(agentId, new Set());
+        }
+        this.sessionPermissionGrants.get(agentId).add(permissionKey);
+    }
+
+    hasSessionGrant(agentId, permissionKey) {
+        if (!agentId || !permissionKey) return false;
+        return this.sessionPermissionGrants.get(agentId)?.has(permissionKey) === true;
     }
 
     sendSnapshot(socket) {
@@ -165,16 +228,8 @@ class NotchMonitorServer {
     }
 
     broadcast(message) {
-        // 优化 broadcast 方法，确保只向活跃连接发送消息并清理无效连接
-        const activeClients = Array.from(this.clients).filter(client => client.writable);
-        activeClients.forEach(client => {
+        this.clients.forEach(client => {
             this.send(client, message);
-        });
-        // 清理无效连接
-        const inactiveClients = Array.from(this.clients).filter(client => !client.writable);
-        inactiveClients.forEach(client => {
-            this.clients.delete(client);
-            client.destroy();
         });
     }
 
@@ -183,25 +238,173 @@ class NotchMonitorServer {
             socket.write(JSON.stringify(message) + '\n');
         }
     }
+
+    enqueuePermissionRequest(agentId, request) {
+        if (!this.pendingPermissionQueues.has(agentId)) {
+            this.pendingPermissionQueues.set(agentId, []);
+        }
+        this.pendingPermissionQueues.get(agentId).push(request);
+    }
+
+    presentPermissionRequest(agentId, request) {
+        const agent = this.agents.get(agentId);
+        if (!agent) return;
+
+        agent.needsPermission = true;
+        agent.permissionRequest = request;
+        agent.lastUpdate = Date.now();
+        this.broadcast({
+            type: 'interaction_requested',
+            data: {
+                agentId,
+                request: buildPermissionInteractionRequest(request),
+            },
+        });
+        this.broadcast({
+            type: 'permission_requested',
+            data: {
+                agentId,
+                request,
+            },
+        });
+    }
+
+    presentNextQueuedPermission(agentId) {
+        const queue = this.pendingPermissionQueues.get(agentId);
+        if (!queue || queue.length === 0) {
+            this.pendingPermissionQueues.delete(agentId);
+            return;
+        }
+
+        const nextRequest = queue.shift();
+        if (!nextRequest) {
+            this.pendingPermissionQueues.delete(agentId);
+            return;
+        }
+
+        if (queue.length === 0) {
+            this.pendingPermissionQueues.delete(agentId);
+        }
+
+        this.presentPermissionRequest(agentId, nextRequest);
+    }
+
+    cleanupStaleAgents() {
+        const now = Date.now();
+
+        for (const [id, agent] of this.agents.entries()) {
+            const age = now - (agent.lastUpdate || 0);
+            const hasLivePID = isLiveProcess(agent.pid);
+
+            if (agent.needsPermission && age < MISSING_PID_AGENT_TTL_MS) {
+                continue;
+            }
+
+            if (agent.status === 'completed') {
+                if (age > COMPLETED_AGENT_TTL_MS) {
+                    debugLog(`Cleaning completed agent ${id} age=${age}`);
+                    this.unregisterAgent(id);
+                }
+                continue;
+            }
+
+            if (agent.pid && !hasLivePID && age > DEAD_PID_GRACE_MS) {
+                debugLog(`Cleaning dead-pid agent ${id} pid=${agent.pid} age=${age}`);
+                this.unregisterAgent(id);
+                continue;
+            }
+
+            if (!agent.pid && age > MISSING_PID_AGENT_TTL_MS) {
+                debugLog(`Cleaning stale no-pid agent ${id} age=${age}`);
+                this.unregisterAgent(id);
+            }
+        }
+    }
+
+    stop() {
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = null;
+        }
+    }
 }
 
 function generateId() {
     return Math.random().toString(36).substring(2, 15);
 }
 
-function isValidMessage(message) {
-    return message &&
-           typeof message === 'object' &&
-           typeof message.type === 'string' &&
-           (message.data === undefined || typeof message.data === 'object');
+function normalizePermissionPart(value) {
+    if (value == null) return '';
+    return String(value).trim().replace(/\s+/g, ' ');
 }
 
-/**
- * 清理本地 socket 文件，避免 bridge 重启时被旧文件阻塞。
- */
-function cleanupSocketFile() {
-    if (fs.existsSync(SOCKET_PATH)) {
-        fs.unlinkSync(SOCKET_PATH);
+function permissionKeyForRequest(request) {
+    const type = normalizePermissionPart(request?.type);
+    if (!type) return '';
+
+    if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(type)) {
+        return `${type}:file:${normalizePermissionPart(request.filePath || request.message)}`;
+    }
+
+    if (type === 'Bash') {
+        return `${type}:command:${normalizePermissionPart(request.command || request.message)}`;
+    }
+
+    return `${type}:input:${normalizePermissionPart(request.message)}`;
+}
+
+function buildPermissionInteractionRequest(request) {
+    const type = normalizePermissionPart(request?.type) || 'Permission';
+    return {
+        id: request?.id || generateId(),
+        kind: 'permission',
+        title: `Allow ${type}`,
+        message: request?.message || null,
+        markdown: null,
+        options: [
+            { id: 'allow', value: 'allow', title: 'Allow', detail: null },
+            { id: 'deny', value: 'deny', title: 'Deny', detail: null },
+            { id: 'allow_similar', value: 'allow_similar', title: 'Allow Similar', detail: 'Session only' },
+        ],
+        textResponse: {
+            enabled: false,
+            placeholder: null,
+        },
+        metadata: {
+            toolName: type,
+            command: request?.command || null,
+            filePath: request?.filePath || null,
+            permissionKey: request?.permissionKey || null,
+        },
+        timestamp: request?.timestamp || Date.now(),
+    };
+}
+
+function buildPermissionInteractionResponse(data, permissionKey) {
+    return {
+        agentId: data.agentId,
+        requestId: data.requestId,
+        selectedOption: data.allowed ? (data.scope === 'session_similar' ? 'allow_similar' : 'allow') : 'deny',
+        text: null,
+        scope: data.scope || 'once',
+        metadata: {
+            permissionKey: permissionKey || null,
+            autoApproved: Boolean(data.autoApproved),
+        }
+    };
+}
+
+function isLiveProcess(pid) {
+    const numericPID = Number(pid);
+    if (!Number.isInteger(numericPID) || numericPID <= 0) {
+        return false;
+    }
+
+    try {
+        process.kill(numericPID, 0);
+        return true;
+    } catch (error) {
+        return error.code !== 'ESRCH';
     }
 }
 
@@ -212,11 +415,9 @@ server.start();
 // 优雅退出
 process.on('SIGINT', () => {
     console.log('\nShutting down...');
-    cleanupSocketFile();
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    cleanupSocketFile();
+    server.stop();
+    if (fs.existsSync(SOCKET_PATH)) {
+        fs.unlinkSync(SOCKET_PATH);
+    }
     process.exit(0);
 });

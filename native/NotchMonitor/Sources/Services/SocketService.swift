@@ -25,6 +25,7 @@ class SocketService: ObservableObject {
     private var codexAgents: [String: Agent] = [:]
     private var promptCache: [String: PromptCacheEntry] = [:]
     private var pendingPermissionRequests: [String: PermissionRequest] = [:]
+    private var protocolInteractivePromptIDs: [String: String] = [:]
     private var isRefreshingProcesses = false
 
     private init() {}
@@ -54,7 +55,8 @@ class SocketService: ObservableObject {
                 return
             }
 
-            self.sendPermissionResponse(agentId: agentId, allowed: allowed)
+            let scope = notification.userInfo?["scope"] as? String ?? "once"
+            self.sendPermissionResponse(agentId: agentId, allowed: allowed, scope: scope)
         }
     }
 
@@ -179,6 +181,7 @@ class SocketService: ObservableObject {
             guard let id = message.data?.first?.id else { return }
             socketAgents.removeValue(forKey: id)
             pendingPermissionRequests.removeValue(forKey: id)
+            protocolInteractivePromptIDs.removeValue(forKey: id)
             publishAgents()
         case "permission_requested":
             guard
@@ -197,23 +200,72 @@ class SocketService: ObservableObject {
             }
             print("Permission requested for agent \(agentId): \(request.type) \(request.message)")
             publishAgents()
+        case "interaction_requested":
+            guard
+                let payload = message.data?.first,
+                let agentId = payload.agentId,
+                let request = payload.interactionRequest
+            else {
+                return
+            }
+
+            if request.kind == "permission", let permissionRequest = request.asPermissionRequest() {
+                pendingPermissionRequests[agentId] = permissionRequest
+                if var agent = socketAgents[agentId] {
+                    agent.needsPermission = true
+                    agent.permissionRequest = permissionRequest
+                    socketAgents[agentId] = agent
+                }
+            } else if let prompt = request.asInteractivePrompt() {
+                protocolInteractivePromptIDs[agentId] = prompt.id
+                if var agent = socketAgents[agentId] {
+                    agent.interactivePrompt = prompt
+                    socketAgents[agentId] = agent
+                }
+            }
+            publishAgents()
         case "permission_responded":
             guard let requestId = message.data?.first?.requestId else { return }
             print("Permission responded for request \(requestId)")
-            clearPermissionState(for: requestId)
+            clearInteractionState(for: requestId)
+        case "interaction_responded":
+            guard let requestId = message.data?.first?.requestId else { return }
+            clearInteractionState(for: requestId)
         default:
             break
         }
     }
 
-    private func clearPermissionState(for requestId: String) {
+    private func clearInteractionState(for requestId: String) {
+        clearPermissionState(for: requestId, shouldPublish: false)
+        clearInteractivePromptState(for: requestId, shouldPublish: false)
+        publishAgents()
+    }
+
+    private func clearPermissionState(for requestId: String, shouldPublish: Bool = true) {
         for (id, var agent) in socketAgents where agent.permissionRequest?.id == requestId {
             agent.needsPermission = false
             agent.permissionRequest = nil
             socketAgents[id] = agent
             pendingPermissionRequests.removeValue(forKey: id)
         }
-        publishAgents()
+        if shouldPublish {
+            publishAgents()
+        }
+    }
+
+    private func clearInteractivePromptState(for requestId: String, shouldPublish: Bool = true) {
+        for (id, var agent) in socketAgents where agent.interactivePrompt?.id == requestId {
+            agent.interactivePrompt = nil
+            socketAgents[id] = agent
+            promptCache.removeValue(forKey: id)
+            if protocolInteractivePromptIDs[id] == requestId {
+                protocolInteractivePromptIDs.removeValue(forKey: id)
+            }
+        }
+        if shouldPublish {
+            publishAgents()
+        }
     }
 
     private func applyPendingPermissionsToSocketAgents() {
@@ -227,7 +279,7 @@ class SocketService: ObservableObject {
         }
     }
 
-    func sendPermissionResponse(agentId: String, allowed: Bool) {
+    func sendPermissionResponse(agentId: String, allowed: Bool, scope: String = "once") {
         guard let agent = agents.first(where: { $0.id == agentId }) else { return }
 
         let payload = PermissionResponseMessage(
@@ -235,7 +287,9 @@ class SocketService: ObservableObject {
             data: PermissionResponseData(
                 agentId: agentId,
                 requestId: agent.permissionRequest?.id ?? agentId,
-                allowed: allowed
+                allowed: allowed,
+                scope: scope,
+                permissionKey: agent.permissionRequest?.permissionKey
             )
         )
         send(payload)
@@ -243,6 +297,7 @@ class SocketService: ObservableObject {
 
     func clearInteractivePrompt(agentId: String) {
         promptCache.removeValue(forKey: agentId)
+        protocolInteractivePromptIDs.removeValue(forKey: agentId)
 
         if var agent = socketAgents[agentId] {
             agent.interactivePrompt = nil
@@ -359,16 +414,21 @@ class SocketService: ObservableObject {
                 let args = columns[3].trimmingCharacters(in: .whitespaces)
 
                 guard let agentType = self.inferredAgentType(command: command, args: args) else { continue }
+                guard !self.shouldSuppressGenericProcessAgent(agentType: agentType, command: command, args: args, tty: tty) else { continue }
 
-                if agentType == .codex, self.isInteractiveCodexProcess(command: command, args: args, tty: tty) {
-                    activeCodexProcesses.append(
-                        CodexProcessSnapshot(
-                            pid: pid,
-                            tty: tty == "??" ? "background" : tty,
-                            command: command,
-                            args: args
+                if agentType == .codex {
+                    if self.isInteractiveCodexProcess(command: command, args: args, tty: tty) {
+                        activeCodexProcesses.append(
+                            CodexProcessSnapshot(
+                                pid: pid,
+                                tty: tty == "??" ? "background" : tty,
+                                command: command,
+                                args: args
+                            )
                         )
-                    )
+                    }
+                    // Codex sessions are merged separately so helper processes do not leak into the generic process list.
+                    continue
                 }
 
                 let id = "process-\(pid)"
@@ -380,10 +440,6 @@ class SocketService: ObservableObject {
                     status: .running,
                     terminal: tty == "??" ? "background" : tty,
                     tty: tty == "??" ? nil : tty,
-                    // Carry the runtime pid through process discovery so
-                    // socket- and process-originated views of the same session
-                    // resolve to the same dedupe key.
-                    pid: Int(pid),
                     currentTask: args,
                     lastUpdate: Date()
                 )
@@ -397,16 +453,24 @@ class SocketService: ObservableObject {
         }
     }
 
-    /// Merges agents from all discovery sources before deduplication so sessions
-    /// are never dropped purely because they share the same display name.
     private func publishAgents() {
-        var merged = mergedAgents(
-            from: [
-                Array(socketAgents.values),
-                Array(processAgents.values),
-                Array(codexAgents.values)
-            ]
-        )
+        var merged = Array(socketAgents.values)
+        let existingNames = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
+
+        for agent in processAgents.values {
+            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
+            if !existingNames.contains(key) {
+                merged.append(agent)
+            }
+        }
+
+        let namesAfterProcessMerge = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
+        for agent in codexAgents.values {
+            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
+            if !namesAfterProcessMerge.contains(key) {
+                merged.append(agent)
+            }
+        }
 
         merged = merged.map { agent in
             var updatedAgent = agent
@@ -431,12 +495,6 @@ class SocketService: ObservableObject {
         refreshInteractivePrompts(for: agents)
     }
 
-    /// Flattens discovery sources in priority order and keeps every candidate
-    /// until runtime-aware deduplication decides whether two entries are the same session.
-    private func mergedAgents(from sources: [[Agent]]) -> [Agent] {
-        sources.flatMap { $0 }
-    }
-
     private func deduplicatedAgents(from merged: [Agent]) -> [Agent] {
         var selectedByKey: [String: Agent] = [:]
 
@@ -452,30 +510,14 @@ class SocketService: ObservableObject {
         return Array(selectedByKey.values)
     }
 
-    /// Builds a composite runtime key so same-name sessions remain distinct when
-    /// they differ by tty, pid, or cwd, while duplicate entries from different
-    /// discovery sources still collapse to one logical session.
     private func dedupeKey(for agent: Agent) -> String {
-        let tty = normalizedTTY(agent.tty ?? agent.terminal)
-        let pid = agent.pid.map(String.init)
-        let cwd = normalizedCWD(agent.cwd)
-
-        if let tty, let pid {
-            return "\(agent.type.rawValue)|tty:\(tty)|pid:\(pid)"
-        }
-        if let tty, let cwd {
-            return "\(agent.type.rawValue)|tty:\(tty)|cwd:\(cwd)"
-        }
-        if let pid, let cwd {
-            return "\(agent.type.rawValue)|pid:\(pid)|cwd:\(cwd)"
-        }
-        if let tty {
+        if let tty = normalizedTTY(agent.tty ?? agent.terminal), !tty.isEmpty {
             return "\(agent.type.rawValue)|tty:\(tty)"
         }
-        if let pid {
+        if let pid = agent.pid {
             return "\(agent.type.rawValue)|pid:\(pid)"
         }
-        if let cwd {
+        if let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !cwd.isEmpty {
             return "\(agent.type.rawValue)|cwd:\(cwd)"
         }
         return "\(agent.type.rawValue)|name:\(agent.name.lowercased())"
@@ -488,13 +530,6 @@ class SocketService: ObservableObject {
         if trimmed.hasPrefix("/dev/") {
             return String(trimmed.dropFirst("/dev/".count))
         }
-        return trimmed
-    }
-
-    private func normalizedCWD(_ cwd: String?) -> String? {
-        guard let cwd else { return nil }
-        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return nil }
         return trimmed
     }
 
@@ -556,9 +591,9 @@ class SocketService: ObservableObject {
         }
     }
 
-    /// 仅对当前能够安全读取与提交交互式 prompt 的会话开启检测。
     private func shouldInspectInteractivePrompt(agent: Agent) -> Bool {
         guard !agent.needsPermission else { return false }
+        guard protocolInteractivePromptIDs[agent.id] == nil else { return false }
         guard let tty = agent.tty, !tty.isEmpty else { return false }
         guard TerminalPromptService.supportsInlinePrompt(for: agent) else { return false }
         return agent.status == .waiting || agent.type == .codex
@@ -608,7 +643,9 @@ class SocketService: ObservableObject {
     }
 
     private func refreshCodexAgents(activeProcesses: [CodexProcessSnapshot]) {
-        guard !activeProcesses.isEmpty else {
+        let primaryProcesses = deduplicatedCodexProcesses(activeProcesses)
+
+        guard !primaryProcesses.isEmpty else {
             codexAgents = [:]
             return
         }
@@ -622,7 +659,7 @@ class SocketService: ObservableObject {
         else {
             print("Codex monitor: failed to read history or sessions directory")
             codexAgents = Dictionary(
-                uniqueKeysWithValues: activeProcesses.map { process in
+                uniqueKeysWithValues: primaryProcesses.map { process in
                     let agent = Agent(
                         id: "codex-process:\(process.pid)",
                         name: "codex",
@@ -705,7 +742,7 @@ class SocketService: ObservableObject {
         recentSessions.sort { $0.lastUpdate > $1.lastUpdate }
 
         var detected: [String: Agent] = [:]
-        for (index, process) in activeProcesses.enumerated() {
+        for (index, process) in primaryProcesses.enumerated() {
             if index < recentSessions.count {
                 let sessionAgent = recentSessions[index]
                 let agent = Agent(
@@ -741,7 +778,51 @@ class SocketService: ObservableObject {
         }
 
         codexAgents = detected
-        print("Codex monitor: built \(detected.count) visible codex agent(s) from \(activeProcesses.count) active codex process(es)")
+        print("Codex monitor: built \(detected.count) visible codex agent(s) from \(primaryProcesses.count) primary codex process(es)")
+    }
+
+    private func deduplicatedCodexProcesses(_ processes: [CodexProcessSnapshot]) -> [CodexProcessSnapshot] {
+        var selectedByTTY: [String: CodexProcessSnapshot] = [:]
+
+        for process in processes {
+            let key = normalizedTTY(process.tty) ?? process.tty
+            if let existing = selectedByTTY[key] {
+                selectedByTTY[key] = preferredCodexProcess(existing, process)
+            } else {
+                selectedByTTY[key] = process
+            }
+        }
+
+        return Array(selectedByTTY.values).sorted { lhs, rhs in
+            codexProcessScore(lhs) == codexProcessScore(rhs)
+                ? lhs.pid < rhs.pid
+                : codexProcessScore(lhs) > codexProcessScore(rhs)
+        }
+    }
+
+    private func preferredCodexProcess(_ lhs: CodexProcessSnapshot, _ rhs: CodexProcessSnapshot) -> CodexProcessSnapshot {
+        let lhsScore = codexProcessScore(lhs)
+        let rhsScore = codexProcessScore(rhs)
+        if lhsScore != rhsScore {
+            return lhsScore > rhsScore ? lhs : rhs
+        }
+
+        return lhs.pid < rhs.pid ? lhs : rhs
+    }
+
+    private func codexProcessScore(_ process: CodexProcessSnapshot) -> Int {
+        var score = 0
+        let command = process.command.lowercased()
+        let args = process.args.lowercased()
+
+        if command == "codex" { score += 100 }
+        if args.hasPrefix("codex ") || args == "codex" { score += 80 }
+        if !args.contains("hook.js") { score += 40 }
+        if !args.contains("wrapper") { score += 25 }
+        if !args.contains("node ") { score += 20 }
+        if process.tty != "background" { score += 15 }
+
+        return score
     }
 
     private func inferredAgentType(command: String, args: String) -> AgentType? {
@@ -758,6 +839,9 @@ class SocketService: ObservableObject {
         }
         if haystack.contains("gemini") {
             return .gemini
+        }
+        if haystack.contains("qodercli") || haystack.contains("qoder-cli") || haystack.contains("qoder") {
+            return .qoder
         }
         if haystack.contains("opencode") || haystack.contains("open_code") {
             return .openCode
@@ -789,6 +873,26 @@ class SocketService: ObservableObject {
             return trimmedArgs
         }
         return fallback.isEmpty ? agentType.rawValue : fallback
+    }
+
+    private func shouldSuppressGenericProcessAgent(agentType: AgentType, command: String, args: String, tty: String) -> Bool {
+        let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedArgs = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if agentType == .claude {
+            if normalizedCommand == ".claude" {
+                return true
+            }
+            if normalizedArgs.contains(".cursor") && (normalizedArgs.contains("claude") || normalizedCommand.contains("claude")) {
+                return true
+            }
+        }
+
+        if agentType == .cursor && tty == "??" && normalizedArgs.isEmpty {
+            return true
+        }
+
+        return false
     }
 }
 
@@ -907,7 +1011,60 @@ private struct MessagePayload: Decodable {
     let permissionRequest: PermissionRequestPayload?
     let agentId: String?
     let request: PermissionRequestPayload?
+    let interactionRequest: InteractionRequestPayload?
     let requestId: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case type
+        case status
+        case terminal
+        case terminalApp
+        case tty
+        case cwd
+        case pid
+        case terminalTitleToken
+        case parentPid
+        case parentCommand
+        case processChain
+        case environmentHints
+        case jetbrainsContext
+        case currentTask
+        case lastUpdate
+        case needsPermission
+        case permissionRequest
+        case agentId
+        case request
+        case requestId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        terminal = try container.decodeIfPresent(String.self, forKey: .terminal)
+        terminalApp = try container.decodeIfPresent(String.self, forKey: .terminalApp)
+        tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        terminalTitleToken = try container.decodeIfPresent(String.self, forKey: .terminalTitleToken)
+        parentPid = try container.decodeIfPresent(Int.self, forKey: .parentPid)
+        parentCommand = try container.decodeIfPresent(String.self, forKey: .parentCommand)
+        processChain = try container.decodeIfPresent([String].self, forKey: .processChain)
+        environmentHints = try container.decodeIfPresent([String: String].self, forKey: .environmentHints)
+        jetbrainsContext = try container.decodeIfPresent([String: String].self, forKey: .jetbrainsContext)
+        currentTask = try container.decodeIfPresent(String.self, forKey: .currentTask)
+        lastUpdate = try container.decodeIfPresent(Double.self, forKey: .lastUpdate)
+        needsPermission = try container.decodeIfPresent(Bool.self, forKey: .needsPermission)
+        permissionRequest = try container.decodeIfPresent(PermissionRequestPayload.self, forKey: .permissionRequest)
+        agentId = try container.decodeIfPresent(String.self, forKey: .agentId)
+        request = try container.decodeIfPresent(PermissionRequestPayload.self, forKey: .request)
+        interactionRequest = try container.decodeIfPresent(InteractionRequestPayload.self, forKey: .request)
+        requestId = try container.decodeIfPresent(String.self, forKey: .requestId)
+    }
 
     func asAgent() -> Agent? {
         guard
@@ -947,11 +1104,71 @@ private struct MessagePayload: Decodable {
     }
 }
 
+private struct InteractionRequestPayload: Decodable {
+    let id: String
+    let kind: String
+    let title: String
+    let message: String?
+    let markdown: String?
+    let options: [InteractionOptionPayload]
+    let textResponse: InteractionTextResponsePayload?
+    let metadata: [String: String?]?
+    let timestamp: Double?
+
+    func asPermissionRequest() -> PermissionRequest? {
+        guard kind == "permission" else { return nil }
+
+        let toolName = metadata?["toolName"] ?? nil
+        let command = metadata?["command"] ?? nil
+        let filePath = metadata?["filePath"] ?? nil
+        let permissionKey = metadata?["permissionKey"] ?? nil
+
+        return PermissionRequest(
+            id: id,
+            type: toolName ?? title.replacingOccurrences(of: "Allow ", with: ""),
+            message: message ?? title,
+            filePath: filePath,
+            command: command,
+            permissionKey: permissionKey,
+            timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
+        )
+    }
+
+    func asInteractivePrompt() -> InteractivePrompt? {
+        guard kind != "permission" else { return nil }
+        return InteractivePrompt(
+            id: id,
+            title: title,
+            message: markdown ?? message,
+            options: options.map { $0.asInteractiveOption() },
+            timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
+        )
+    }
+}
+
+private struct InteractionOptionPayload: Decodable {
+    let id: String
+    let value: String
+    let title: String
+    let detail: String?
+
+    func asInteractiveOption() -> InteractiveOption {
+        InteractiveOption(id: id, value: value, title: title, detail: detail)
+    }
+}
+
+private struct InteractionTextResponsePayload: Decodable {
+    let enabled: Bool
+    let placeholder: String?
+}
+
 private struct PermissionRequestPayload: Decodable {
     let id: String
     let type: String
     let message: String
     let filePath: String?
+    let command: String?
+    let permissionKey: String?
     let timestamp: Double?
 
     func asPermissionRequest() -> PermissionRequest {
@@ -960,6 +1177,8 @@ private struct PermissionRequestPayload: Decodable {
             type: type,
             message: message,
             filePath: filePath,
+            command: command,
+            permissionKey: permissionKey,
             timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
         )
     }
@@ -974,6 +1193,8 @@ private struct PermissionResponseData: Encodable {
     let agentId: String
     let requestId: String
     let allowed: Bool
+    let scope: String
+    let permissionKey: String?
 }
 
 // MARK: - Color Extension

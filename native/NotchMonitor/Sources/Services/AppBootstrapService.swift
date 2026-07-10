@@ -15,8 +15,10 @@ final class AppBootstrapService: ObservableObject {
     private var bridgeProcess: Process?
     private var diagnosticsTimer: Timer?
     private var didStart = false
+    private var lastAutoRepairAt: Date?
     private let onboardingSuppressedKey = "OpenIslandOnboardingSuppressed"
     private let onboardingSeenKey = "OpenIslandOnboardingSeen"
+    private let autoRepairCooldown: TimeInterval = 20
 
     private init() {
         refreshDiagnostics()
@@ -63,6 +65,7 @@ final class AppBootstrapService: ObservableObject {
         DispatchQueue.main.async {
             self.checks = nextChecks
             self.requestOnboardingPresentationIfNeeded()
+            self.scheduleAutoRepairIfNeeded(for: nextChecks)
         }
     }
 
@@ -127,6 +130,41 @@ final class AppBootstrapService: ObservableObject {
         }
     }
 
+    private func scheduleAutoRepairIfNeeded(for checks: [BootstrapCheck]) {
+        guard shouldAutoRepair(for: checks) else { return }
+
+        let now = Date()
+        if let lastAutoRepairAt, now.timeIntervalSince(lastAutoRepairAt) < autoRepairCooldown {
+            return
+        }
+
+        lastAutoRepairAt = now
+        runtimeQueue.async {
+            self.installToolingIfPossible()
+            self.startBridgeIfPossible(forceRestart: true)
+            DispatchQueue.main.async {
+                self.refreshDiagnostics()
+            }
+        }
+    }
+
+    private func shouldAutoRepair(for checks: [BootstrapCheck]) -> Bool {
+        guard didStart else { return false }
+        guard !isBootstrapping else { return false }
+        guard nodeInvocation() != nil else { return false }
+
+        let repairableCheckIDs: Set<String> = [
+            "claude-hooks",
+            "codex-hooks",
+            "codex-wrapper",
+            "bridge",
+        ]
+
+        return checks.contains { check in
+            repairableCheckIDs.contains(check.id) && check.state != .ready
+        }
+    }
+
     private func finishBootstrap() {
         DispatchQueue.main.async {
             self.isBootstrapping = false
@@ -164,7 +202,15 @@ final class AppBootstrapService: ObservableObject {
         runNodeScript(nodeInvocation: nodeInvocation, scriptURL: codexWrapperScript)
     }
 
-    private func startBridgeIfPossible() {
+    private func startBridgeIfPossible(forceRestart: Bool = false) {
+        if forceRestart, bridgeProcess?.isRunning == true {
+            bridgeProcess?.terminate()
+            bridgeProcess = nil
+            DispatchQueue.main.async {
+                self.isBridgeRunning = false
+            }
+        }
+
         guard bridgeProcess == nil else { return }
         guard let nodeInvocation = nodeInvocation() else {
             noteBootstrapError("Node.js not found")
@@ -295,6 +341,7 @@ final class AppBootstrapService: ObservableObject {
         let nodeInstalled = nodeInvocation() != nil
         let accessibilityGranted = AXIsProcessTrusted()
         let claudeInstalled = claudeHookInstalled()
+        let codexHooksInstalled = codexHookInstalled()
         let codexWrapperInstalled = codexWrapperExists()
         let pathConfigured = shellConfigMentionsLocalBin() || currentEnvironmentContainsLocalBin()
         let socketReachable = SocketService.shared.isConnected
@@ -342,6 +389,16 @@ final class AppBootstrapService: ObservableObject {
                 actionTitle: codexWrapperInstalled ? "Reinstall" : "Install"
             ),
             BootstrapCheck(
+                id: "codex-hooks",
+                title: codexHooksInstalled ? "Codex hooks are installed" : "Install Codex hooks",
+                detail: codexHooksInstalled
+                    ? "Codex permission and lifecycle events should reach Open Island automatically."
+                    : "Open Island could not confirm the managed Codex hooks in ~/.codex/hooks.json.",
+                state: codexHooksInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
+                action: .retrySetup,
+                actionTitle: codexHooksInstalled ? "Reinstall" : "Install"
+            ),
+            BootstrapCheck(
                 id: "shell-path",
                 title: pathConfigured ? "~/.local/bin is in shell startup" : "Add ~/.local/bin to shell startup",
                 detail: pathConfigured
@@ -358,7 +415,7 @@ final class AppBootstrapService: ObservableObject {
                     ? "The app is connected to /tmp/notch-monitor.sock."
                     : (bridgeRunning
                         ? "The bridge process is running, but the app has not connected yet."
-                        : "Open Island could not reach the bundled bridge. Retry setup if this persists."),
+                        : bridgeFailureDetail()),
                 state: socketReachable ? .ready : (bridgeRunning ? .running : .warning),
                 action: .retrySetup,
                 actionTitle: socketReachable ? "Restart" : "Retry Setup"
@@ -403,6 +460,30 @@ final class AppBootstrapService: ObservableObject {
         return content.contains("codex-wrapper.js")
     }
 
+    private func codexHookInstalled() -> Bool {
+        let hooksURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent("hooks.json")
+
+        guard
+            let data = try? Data(contentsOf: hooksURL),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let hooks = json["hooks"] as? [String: Any]
+        else {
+            return false
+        }
+
+        return hooks.values.contains { value in
+            guard let entries = value as? [[String: Any]] else { return false }
+            return entries.contains { entry in
+                if let hooks = entry["hooks"] as? [[String: Any]] {
+                    return hooks.contains { ($0["command"] as? String)?.contains("hook.js event codex") == true }
+                }
+                return false
+            }
+        }
+    }
+
     private func shellConfigMentionsLocalBin() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let candidates = [".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"]
@@ -417,6 +498,13 @@ final class AppBootstrapService: ObservableObject {
     private func currentEnvironmentContainsLocalBin() -> Bool {
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return path.contains("/.local/bin")
+    }
+
+    private func bridgeFailureDetail() -> String {
+        if let lastBootstrapError, !lastBootstrapError.isEmpty {
+            return "Open Island could not reach the bundled bridge. Last error: \(lastBootstrapError)"
+        }
+        return "Open Island could not reach the bundled bridge. Retry setup if this persists."
     }
 }
 

@@ -105,7 +105,7 @@ final class PowerAssertionService: ObservableObject {
         }
 
         switch agent.type {
-        case .claude, .codex, .gemini:
+        case .claude, .codex, .gemini, .qoder:
             return true
         case .cursor, .openCode:
             return false

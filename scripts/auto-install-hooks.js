@@ -7,16 +7,25 @@ const repoRoot = path.resolve(__dirname, '..');
 const nodePath = process.execPath;
 const hookScript = path.join(repoRoot, 'bridge', 'hook.js');
 const claudeSettingsPath = path.join(process.env.HOME, '.claude', 'settings.json');
+const cursorHooksPath = path.join(process.env.HOME, '.cursor', 'hooks.json');
+const geminiSettingsPath = path.join(process.env.HOME, '.gemini', 'settings.json');
+const qoderSettingsPath = path.join(process.env.HOME, '.qoder', 'settings.json');
 const codexConfigPath = path.join(process.env.HOME, '.codex', 'config.toml');
 const codexHooksPath = path.join(process.env.HOME, '.codex', 'hooks.json');
 const installCodexBridgeHooks = process.env.NOTCH_MONITOR_ENABLE_CODEX_HOOKS === '1';
 
 const claudeCommand = `${nodePath} ${hookScript} event claude`;
+const cursorCommand = `${nodePath} ${hookScript} event cursor`;
+const geminiCommand = `${nodePath} ${hookScript} event gemini`;
+const qoderCommand = `${nodePath} ${hookScript} event qoder`;
 const codexCommand = `${nodePath} ${hookScript} event codex`;
 
 const matcherEvents = ['PreToolUse', 'PostToolUse', 'Notification'];
 const passiveEvents = ['SessionStart', 'SessionEnd', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
+const cursorEvents = ['beforeSubmitPrompt', 'beforeShellExecution', 'beforeMCPExecution', 'beforeReadFile', 'afterFileEdit', 'stop'];
+const geminiEvents = ['SessionStart', 'SessionEnd', 'BeforeAgent', 'AfterAgent', 'Notification'];
 const codexEvents = ['SessionStart', 'SessionEnd', 'Stop', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification'];
+const codexMatcherEvents = ['PreToolUse'];
 
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -38,10 +47,7 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
-/**
- * 移除由 Open Island 管理的旧 hook，避免重复注入或遗留失效命令。
- */
-function stripManagedEntries(entries) {
+function filterManagedEntries(entries, command) {
   return (entries || []).filter((entry) => {
     if (typeof entry === 'string') {
       return !entry.includes('bridge/hook.js') && !entry.includes('.vibe-island/bin/vibe-island-bridge');
@@ -54,16 +60,8 @@ function stripManagedEntries(entries) {
       return !hookCommand.includes('bridge/hook.js') && !hookCommand.includes('.vibe-island/bin/vibe-island-bridge');
     });
 
-    if (nextHooks.length === entry.hooks.length) {
-      return true;
-    }
-
-    if (nextHooks.length === 0) {
-      return false;
-    }
-
     entry.hooks = nextHooks;
-    return true;
+    return nextHooks.length > 0;
   });
 }
 
@@ -79,8 +77,129 @@ function managedCommandEntry(command, matcher) {
     : { hooks: [hook] };
 }
 
+function dedupeHookEntries(entries) {
+  const seen = new Set();
+  const result = [];
+
+  for (const entry of entries || []) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const matcher = typeof entry.matcher === 'string' ? entry.matcher : '';
+    const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+    const key = JSON.stringify({
+      matcher,
+      hooks: hooks.map((hook) => ({
+        command: hook?.command || '',
+        type: hook?.type || '',
+        timeout: hook?.timeout || 0,
+      })),
+    });
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(entry);
+  }
+
+  return result;
+}
+
+function isManagedHookCommand(command) {
+  return typeof command === 'string'
+    && (command.includes('bridge/hook.js') || command.includes('.vibe-island/bin/vibe-island-bridge'));
+}
+
+function countManagedHookEntries(entries) {
+  let count = 0;
+  for (const entry of entries || []) {
+    if (!entry || typeof entry !== 'object') continue;
+    const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+    if (hooks.some((hook) => isManagedHookCommand(hook?.command || ''))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function countManagedCursorHookEntries(entries) {
+  let count = 0;
+  for (const entry of entries || []) {
+    const command = entry && typeof entry === 'object' ? entry.command || '' : '';
+    if (isManagedHookCommand(command)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function logHookSummary(label, eventNames, entriesByEvent, counter) {
+  const parts = eventNames.map((eventName) => `${eventName}:${counter(entriesByEvent[eventName] || [])}`);
+  console.log(`${label} managed hooks -> ${parts.join(', ')}`);
+}
+
 function installClaudeHooks() {
-  const settings = readJson(claudeSettingsPath, {});
+  installClaudeFamilyHooks(claudeSettingsPath, claudeCommand);
+}
+
+function installQoderHooks() {
+  installClaudeFamilyHooks(qoderSettingsPath, qoderCommand);
+}
+
+function installCursorHooks() {
+  const config = readJson(cursorHooksPath, {});
+  const hooks = config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks)
+    ? config.hooks
+    : config;
+
+  for (const eventName of Object.keys(hooks)) {
+    const entries = Array.isArray(hooks[eventName]) ? hooks[eventName] : [];
+    hooks[eventName] = entries.filter((entry) => {
+      const hookCommand = entry && typeof entry === 'object' ? entry.command || '' : '';
+      return !hookCommand.includes('bridge/hook.js') && !hookCommand.includes('.vibe-island/bin/vibe-island-bridge');
+    });
+
+    if (!hooks[eventName].length) {
+      delete hooks[eventName];
+    }
+  }
+
+  for (const eventName of cursorEvents) {
+    hooks[eventName] = hooks[eventName] || [];
+    hooks[eventName].push({ command: cursorCommand });
+  }
+
+  if (config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks)) {
+    config.hooks = hooks;
+  } else {
+    Object.assign(config, hooks);
+  }
+
+  backupFile(cursorHooksPath);
+  writeJson(cursorHooksPath, config);
+  logHookSummary('Cursor', cursorEvents, hooks, countManagedCursorHookEntries);
+}
+
+function installGeminiHooks() {
+  const settings = readJson(geminiSettingsPath, {});
+  settings.hooks = settings.hooks || {};
+
+  for (const [eventName, entries] of Object.entries(settings.hooks)) {
+    settings.hooks[eventName] = filterManagedEntries(entries, geminiCommand);
+  }
+
+  for (const eventName of geminiEvents) {
+    settings.hooks[eventName] = settings.hooks[eventName] || [];
+    settings.hooks[eventName].unshift(managedCommandEntry(geminiCommand));
+  }
+
+  backupFile(geminiSettingsPath);
+  writeJson(geminiSettingsPath, settings);
+  logHookSummary('Gemini', geminiEvents, settings.hooks, countManagedHookEntries);
+}
+
+function installClaudeFamilyHooks(settingsPath, command) {
+  const settings = readJson(settingsPath, {});
   settings.hooks = settings.hooks || {};
 
   if (Object.prototype.hasOwnProperty.call(settings.hooks, 'beforeStart')) {
@@ -88,30 +207,31 @@ function installClaudeHooks() {
   }
 
   for (const [eventName, entries] of Object.entries(settings.hooks)) {
-    settings.hooks[eventName] = stripManagedEntries(entries);
+    settings.hooks[eventName] = filterManagedEntries(entries, command);
   }
 
   for (const eventName of matcherEvents) {
     settings.hooks[eventName] = settings.hooks[eventName] || [];
-    settings.hooks[eventName].unshift(managedCommandEntry(claudeCommand, '*'));
+    settings.hooks[eventName].unshift(managedCommandEntry(command, '*'));
+    settings.hooks[eventName] = dedupeHookEntries(settings.hooks[eventName]);
   }
 
   for (const eventName of passiveEvents) {
     settings.hooks[eventName] = settings.hooks[eventName] || [];
-    settings.hooks[eventName].unshift(managedCommandEntry(claudeCommand));
+    settings.hooks[eventName].unshift(managedCommandEntry(command));
+    settings.hooks[eventName] = dedupeHookEntries(settings.hooks[eventName]);
   }
 
-  backupFile(claudeSettingsPath);
-  writeJson(claudeSettingsPath, settings);
+  backupFile(settingsPath);
+  writeJson(settingsPath, settings);
+  const label = settingsPath === claudeSettingsPath ? 'Claude' : 'Qoder';
+  logHookSummary(label, [...matcherEvents, ...passiveEvents], settings.hooks, countManagedHookEntries);
 }
 
-/**
- * 只有在显式开启 Codex bridge hooks 时才写入 codex_hooks feature，避免修改无关用户配置。
- */
 function ensureCodexHooksFeature() {
   ensureDir(codexConfigPath);
   const content = fs.existsSync(codexConfigPath) ? fs.readFileSync(codexConfigPath, 'utf8') : '';
-  if (content.includes('[features]') && content.includes('codex_hooks = true')) return;
+  if (content.includes('[features]') && content.includes('hooks = true') && !content.includes('codex_hooks = true')) return;
 
   let nextContent = content.trimEnd();
   if (!nextContent.includes('[features]')) {
@@ -120,23 +240,24 @@ function ensureCodexHooksFeature() {
     nextContent += '\n';
   }
 
-  if (!nextContent.includes('codex_hooks = true')) {
-    nextContent += 'codex_hooks = true\n';
+  if (nextContent.includes('codex_hooks = true')) {
+    nextContent = nextContent.replace(/(^|\n)codex_hooks = true(?=\n|$)/g, '$1hooks = true');
+  }
+
+  if (!nextContent.includes('hooks = true')) {
+    nextContent += 'hooks = true\n';
   }
 
   backupFile(codexConfigPath);
   fs.writeFileSync(codexConfigPath, `${nextContent.endsWith('\n') ? nextContent : `${nextContent}\n`}`);
 }
 
-/**
- * 安装或清理 Codex hooks。默认保留 wrapper 监控，只有显式 opt-in 才注入 bridge hooks。
- */
 function installCodexHooks() {
   const config = readJson(codexHooksPath, { hooks: {} });
   config.hooks = config.hooks || {};
 
   for (const [eventName, entries] of Object.entries(config.hooks)) {
-    const filteredEntries = stripManagedEntries(entries);
+    const filteredEntries = filterManagedEntries(entries, codexCommand);
     if (filteredEntries.length > 0) {
       config.hooks[eventName] = filteredEntries;
     } else {
@@ -144,21 +265,37 @@ function installCodexHooks() {
     }
   }
 
-  if (installCodexBridgeHooks) {
-    for (const eventName of codexEvents) {
-      config.hooks[eventName] = config.hooks[eventName] || [];
-      const needsMatcher = matcherEvents.includes(eventName);
-      config.hooks[eventName].unshift(managedCommandEntry(codexCommand, needsMatcher ? '*' : undefined));
-    }
+  if (!installCodexBridgeHooks) {
+    backupFile(codexHooksPath);
+    writeJson(codexHooksPath, config);
+    logHookSummary('Codex', codexEvents, config.hooks, countManagedHookEntries);
+    return;
+  }
+
+  for (const eventName of codexEvents) {
+    config.hooks[eventName] = config.hooks[eventName] || [];
+    const needsMatcher = codexMatcherEvents.includes(eventName);
+    config.hooks[eventName].unshift(managedCommandEntry(codexCommand, needsMatcher ? '*' : undefined));
+    config.hooks[eventName] = dedupeHookEntries(config.hooks[eventName]);
   }
 
   backupFile(codexHooksPath);
   writeJson(codexHooksPath, config);
+  logHookSummary('Codex', codexEvents, config.hooks, countManagedHookEntries);
 }
 
 function main() {
   installClaudeHooks();
   console.log('Installed NotchMonitor hooks for Claude');
+
+  installCursorHooks();
+  console.log('Installed NotchMonitor hooks for Cursor');
+
+  installGeminiHooks();
+  console.log('Installed NotchMonitor hooks for Gemini');
+
+  installQoderHooks();
+  console.log('Installed NotchMonitor hooks for Qoder');
 
   if (installCodexBridgeHooks) {
     ensureCodexHooksFeature();
