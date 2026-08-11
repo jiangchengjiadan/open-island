@@ -24,6 +24,7 @@ ICON_DIR="$DIST_DIR/icon"
 ICON_ICNS="$ICON_DIR/OpenIsland.icns"
 
 echo "Building release binary..."
+"$REPO_ROOT/scripts/sync-app-runtime.sh"
 cd "$NATIVE_DIR"
 swift build -c release
 

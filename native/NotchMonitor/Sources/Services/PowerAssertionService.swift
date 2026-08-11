@@ -29,17 +29,23 @@ final class PowerAssertionService: ObservableObject {
 
     private var assertionID = IOPMAssertionID(0)
     private var lastAgents: [Agent] = []
+    private var powerSourceRunLoopSource: CFRunLoopSource?
 
     private init() {
         let defaults = UserDefaults.standard
         if defaults.object(forKey: Self.enabledKey) == nil {
-            defaults.set(true, forKey: Self.enabledKey)
+            defaults.set(false, forKey: Self.enabledKey)
         }
         if defaults.object(forKey: Self.onlyOnPowerAdapterKey) == nil {
             defaults.set(true, forKey: Self.onlyOnPowerAdapterKey)
         }
         isEnabled = defaults.bool(forKey: Self.enabledKey)
         onlyOnPowerAdapter = defaults.bool(forKey: Self.onlyOnPowerAdapterKey)
+        startPowerSourceMonitoring()
+    }
+
+    deinit {
+        stopPowerSourceMonitoring()
     }
 
     func reevaluate(with agents: [Agent]) {
@@ -65,6 +71,36 @@ final class PowerAssertionService: ObservableObject {
 
     func disableForShutdown() {
         releaseAssertion()
+    }
+
+    /// Reevaluates keep-awake state immediately after macOS reports a power source change.
+    private func handlePowerSourceChanged() {
+        reevaluate(with: lastAgents)
+    }
+
+    /// Subscribes to IOKit power source notifications so adapter changes do not wait for the next agent update.
+    private func startPowerSourceMonitoring() {
+        guard powerSourceRunLoopSource == nil else { return }
+
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard let source = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let service = Unmanaged<PowerAssertionService>.fromOpaque(context).takeUnretainedValue()
+            DispatchQueue.main.async {
+                service.handlePowerSourceChanged()
+            }
+        }, context)?.takeRetainedValue() else {
+            return
+        }
+
+        powerSourceRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, CFRunLoopMode.defaultMode)
+    }
+
+    private func stopPowerSourceMonitoring() {
+        guard let source = powerSourceRunLoopSource else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), source, CFRunLoopMode.defaultMode)
+        powerSourceRunLoopSource = nil
     }
 
     private func createAssertion(reason: String) {
@@ -100,7 +136,7 @@ final class PowerAssertionService: ObservableObject {
     }
 
     private static func shouldKeepAwake(for agent: Agent) -> Bool {
-        guard agent.status == .running || agent.status == .waiting || agent.needsPermission || agent.interactivePrompt != nil else {
+        guard agent.status == .running else {
             return false
         }
 

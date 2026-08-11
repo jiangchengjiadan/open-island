@@ -41,15 +41,42 @@ exec "${process.execPath}" "${wrapperRuntime}" --real "${realBinary}" "$@"
 
   ensureDir(installPath);
   if (fs.existsSync(installPath)) {
+    const stats = fs.lstatSync(installPath);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error(`Refusing to replace non-regular Codex launcher at ${installPath}`);
+    }
     const existing = fs.readFileSync(installPath, 'utf8');
-    if (!existing.includes(managedMarker) && !existing.includes(realBinary)) {
-      backupFile(installPath);
+    if (!existing.includes(managedMarker)) {
+      throw new Error(`Refusing to overwrite unmanaged Codex launcher at ${installPath}`);
     }
   }
-  fs.writeFileSync(installPath, script, { mode: 0o755 });
+  const temporaryPath = `${installPath}.open-island.tmp.${process.pid}`;
+  fs.writeFileSync(temporaryPath, script, { mode: 0o755, flag: 'wx' });
+  try {
+    fs.renameSync(temporaryPath, installPath);
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch (_) {}
+    throw error;
+  }
 }
 
 function main() {
+  const args = process.argv.slice(2);
+  if (args.includes('--status')) {
+    const managed = fs.existsSync(installPath) && fs.readFileSync(installPath, 'utf8').includes(managedMarker);
+    console.log(JSON.stringify({ installPath, managed }, null, 2));
+    return;
+  }
+  if (args.includes('--uninstall')) {
+    if (!fs.existsSync(installPath)) return;
+    const existing = fs.readFileSync(installPath, 'utf8');
+    if (!existing.includes(managedMarker)) {
+      throw new Error(`Refusing to remove unmanaged Codex launcher at ${installPath}`);
+    }
+    fs.unlinkSync(installPath);
+    console.log(`Removed managed Codex wrapper at ${installPath}`);
+    return;
+  }
   const realBinary = resolveRealCodexBinary();
   writeWrapper(realBinary);
   console.log(`Installed Codex wrapper at ${installPath}`);

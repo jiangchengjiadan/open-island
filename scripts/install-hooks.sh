@@ -47,9 +47,33 @@ install_bridge() {
 }
 
 install_tool_hooks() {
-    echo -e "${BLUE}Installing Claude, Cursor, Gemini, Qoder, and Codex hooks...${NC}"
-    node "$SCRIPT_DIR/auto-install-hooks.js"
-    node "$SCRIPT_DIR/install-codex-wrapper.js"
+    SELECTED_TOOLS="${OPEN_ISLAND_TOOLS:-}"
+    if [ -z "$SELECTED_TOOLS" ]; then
+        echo -e "${RED}No tools selected.${NC}"
+        echo "Set OPEN_ISLAND_TOOLS to a comma-separated list, for example: claude,cursor"
+        exit 1
+    fi
+    echo -e "${BLUE}Installing explicitly selected tools: $SELECTED_TOOLS${NC}"
+    HOOK_TOOLS="$(printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | sed '/^codex-wrapper$/d' | paste -sd, -)"
+    if [ -n "$HOOK_TOOLS" ]; then
+        PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/open-island-plan.XXXXXX")"
+        rm -f "$PLAN_FILE"
+        node "$SCRIPT_DIR/auto-install-hooks.js" --tools "$HOOK_TOOLS" --plan-file "$PLAN_FILE"
+        if [ "${OPEN_ISLAND_ASSUME_YES:-0}" != "1" ]; then
+            printf "Apply this plan? [y/N] "
+            read -r ANSWER
+            if [ "$ANSWER" != "y" ] && [ "$ANSWER" != "Y" ]; then
+                rm -f "$PLAN_FILE"
+                echo "Installation cancelled."
+                exit 0
+            fi
+        fi
+        node "$SCRIPT_DIR/auto-install-hooks.js" --apply --plan-file "$PLAN_FILE"
+        rm -f "$PLAN_FILE"
+    fi
+    if printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | grep -qx 'codex-wrapper'; then
+        node "$SCRIPT_DIR/install-codex-wrapper.js"
+    fi
     echo -e "${GREEN}✓ Hooks installed${NC}"
 }
 
@@ -72,23 +96,27 @@ BRIDGE_DIR="\$REPO_ROOT/bridge"
 NATIVE_DIR="\$REPO_ROOT/native/NotchMonitor"
 HOOK_INSTALLER="\$REPO_ROOT/scripts/auto-install-hooks.js"
 CODEX_WRAPPER_INSTALLER="\$REPO_ROOT/scripts/install-codex-wrapper.js"
+STATE_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/open-island"
+APP_PID_FILE="\$STATE_DIR/app.pid"
 
 case "\$1" in
     start)
-        echo "Installing hooks..."
-        node "\$HOOK_INSTALLER"
-        node "\$CODEX_WRAPPER_INSTALLER"
-        
         echo "Starting Open Island..."
+        mkdir -p "\$STATE_DIR"
         cd "\$NATIVE_DIR"
         swift package clean >/dev/null 2>&1 || true
         swift run NotchMonitor &
+        echo \$! > "\$APP_PID_FILE"
         ;;
     
     stop)
-        pkill -f "\$BRIDGE_DIR/server.js" 2>/dev/null || true
-        pkill -f "swift run NotchMonitor" 2>/dev/null || true
-        pkill -f "/NotchMonitor" 2>/dev/null || true
+        if [ -f "\$APP_PID_FILE" ]; then
+            APP_PID="\$(cat "\$APP_PID_FILE")"
+            if [[ "\$APP_PID" =~ ^[0-9]+$ ]]; then
+                kill "\$APP_PID" 2>/dev/null || true
+            fi
+            rm -f "\$APP_PID_FILE"
+        fi
         ;;
     
     restart)
@@ -98,7 +126,7 @@ case "\$1" in
         ;;
     
     status)
-        if pgrep -f "\$BRIDGE_DIR/server.js" > /dev/null || pgrep -f "swift run NotchMonitor" > /dev/null || pgrep -f "/NotchMonitor" > /dev/null; then
+        if [ -f "\$APP_PID_FILE" ] && kill -0 "\$(cat "\$APP_PID_FILE")" 2>/dev/null; then
             echo "Open Island is running"
         else
             echo "Open Island is not running"

@@ -8,8 +8,9 @@ class SocketService: ObservableObject {
 
     @Published var agents: [Agent] = []
     @Published var isConnected = false
+    @Published private(set) var submittingPermissionRequestIDs: Set<String> = []
 
-    private let socketPath = "/tmp/notch-monitor.sock"
+    private let socketPath = "/tmp/open-island-\(getuid()).sock"
     private let socketQueue = DispatchQueue(label: "notchmonitor.socket")
     private let processQueue = DispatchQueue(label: "notchmonitor.process-scan", qos: .utility)
     private let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -71,6 +72,9 @@ class SocketService: ObservableObject {
                 return
             }
 
+            var noSignal: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+
             var address = sockaddr_un()
             #if os(macOS)
             address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
@@ -101,11 +105,12 @@ class SocketService: ObservableObject {
             self.socketFD = fd
             self.incomingBuffer.removeAll(keepingCapacity: true)
             self.setupReadSource(for: fd)
-
-            DispatchQueue.main.async {
-                self.isConnected = true
-                print("Socket connected")
-            }
+            self.send(
+                ClientHelloMessage(
+                    type: "hello",
+                    data: ClientHelloData(version: 1, role: "ui", token: RuntimeSecurity.uiCapability)
+                )
+            )
         }
     }
 
@@ -128,7 +133,10 @@ class SocketService: ObservableObject {
         guard socketFD >= 0 else { return }
 
         var buffer = [UInt8](repeating: 0, count: 4096)
-        let bytesRead = read(socketFD, &buffer, buffer.count)
+        var bytesRead: Int
+        repeat {
+            bytesRead = read(socketFD, &buffer, buffer.count)
+        } while bytesRead < 0 && errno == EINTR
 
         if bytesRead > 0 {
             incomingBuffer.append(contentsOf: buffer.prefix(bytesRead))
@@ -136,6 +144,9 @@ class SocketService: ObservableObject {
             return
         }
 
+        if bytesRead < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return
+        }
         handleDisconnect()
     }
 
@@ -160,6 +171,9 @@ class SocketService: ObservableObject {
 
     private func handleMessage(_ message: ServerMessage) {
         switch message.type {
+        case "hello_ack":
+            isConnected = true
+            print("Socket authenticated")
         case "agent_snapshot":
             socketAgents = Dictionary(
                 uniqueKeysWithValues: (message.data?.compactMap { payload in
@@ -226,10 +240,12 @@ class SocketService: ObservableObject {
             publishAgents()
         case "permission_responded":
             guard let requestId = message.data?.first?.requestId else { return }
+            submittingPermissionRequestIDs.remove(requestId)
             print("Permission responded for request \(requestId)")
             clearInteractionState(for: requestId)
         case "interaction_responded":
             guard let requestId = message.data?.first?.requestId else { return }
+            submittingPermissionRequestIDs.remove(requestId)
             clearInteractionState(for: requestId)
         default:
             break
@@ -280,18 +296,25 @@ class SocketService: ObservableObject {
     }
 
     func sendPermissionResponse(agentId: String, allowed: Bool, scope: String = "once") {
-        guard let agent = agents.first(where: { $0.id == agentId }) else { return }
+        guard
+            isConnected,
+            let agent = agents.first(where: { $0.id == agentId }),
+            let request = agent.permissionRequest,
+            pendingPermissionRequests[agentId]?.id == request.id
+        else { return }
 
         let payload = PermissionResponseMessage(
             type: "permission_response",
             data: PermissionResponseData(
                 agentId: agentId,
-                requestId: agent.permissionRequest?.id ?? agentId,
+                requestId: request.id,
                 allowed: allowed,
                 scope: scope,
-                permissionKey: agent.permissionRequest?.permissionKey
+                permissionKey: request.permissionKey,
+                nonce: request.nonce
             )
         )
+        submittingPermissionRequestIDs.insert(request.id)
         send(payload)
     }
 
@@ -321,9 +344,23 @@ class SocketService: ObservableObject {
 
             do {
                 let data = try JSONEncoder().encode(value) + Data([0x0A])
-                _ = data.withUnsafeBytes { bytes in
-                    write(self.socketFD, bytes.baseAddress, bytes.count)
+                let didWrite = data.withUnsafeBytes { bytes -> Bool in
+                    guard let baseAddress = bytes.baseAddress else { return true }
+                    var offset = 0
+                    while offset < bytes.count {
+                        let result = write(self.socketFD, baseAddress.advanced(by: offset), bytes.count - offset)
+                        if result > 0 {
+                            offset += result
+                            continue
+                        }
+                        if result < 0 && errno == EINTR {
+                            continue
+                        }
+                        return false
+                    }
+                    return true
                 }
+                if !didWrite { self.handleDisconnect() }
             } catch {
                 print("Socket encode error: \(error)")
             }
@@ -338,6 +375,10 @@ class SocketService: ObservableObject {
         DispatchQueue.main.async {
             self.isConnected = false
             self.socketAgents = [:]
+            self.pendingPermissionRequests = [:]
+            self.protocolInteractivePromptIDs = [:]
+            self.promptCache = [:]
+            self.submittingPermissionRequestIDs = []
             self.publishAgents()
         }
 
@@ -440,6 +481,7 @@ class SocketService: ObservableObject {
                     status: .running,
                     terminal: tty == "??" ? "background" : tty,
                     tty: tty == "??" ? nil : tty,
+                    pid: Int(pid),
                     currentTask: args,
                     lastUpdate: Date()
                 )
@@ -453,24 +495,16 @@ class SocketService: ObservableObject {
         }
     }
 
+    /// Merges all discovery sources first so same-name sessions are only collapsed
+    /// by runtime identity, never by display name alone.
     private func publishAgents() {
-        var merged = Array(socketAgents.values)
-        let existingNames = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
-
-        for agent in processAgents.values {
-            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
-            if !existingNames.contains(key) {
-                merged.append(agent)
-            }
-        }
-
-        let namesAfterProcessMerge = Set(merged.map { "\($0.type.rawValue)|\($0.name.lowercased())" })
-        for agent in codexAgents.values {
-            let key = "\(agent.type.rawValue)|\(agent.name.lowercased())"
-            if !namesAfterProcessMerge.contains(key) {
-                merged.append(agent)
-            }
-        }
+        var merged = mergedAgents(
+            from: [
+                Array(socketAgents.values),
+                Array(processAgents.values),
+                Array(codexAgents.values)
+            ]
+        )
 
         merged = merged.map { agent in
             var updatedAgent = agent
@@ -495,6 +529,12 @@ class SocketService: ObservableObject {
         refreshInteractivePrompts(for: agents)
     }
 
+    /// Flattens discovery sources in priority order and keeps every candidate
+    /// until runtime-aware deduplication decides whether two entries represent the same session.
+    private func mergedAgents(from sources: [[Agent]]) -> [Agent] {
+        sources.flatMap { $0 }
+    }
+
     private func deduplicatedAgents(from merged: [Agent]) -> [Agent] {
         var selectedByKey: [String: Agent] = [:]
 
@@ -510,14 +550,29 @@ class SocketService: ObservableObject {
         return Array(selectedByKey.values)
     }
 
+    /// Builds a composite runtime key so same-name sessions stay distinct when
+    /// their tty, pid, or cwd differ, while duplicate discovery records still collapse.
     private func dedupeKey(for agent: Agent) -> String {
-        if let tty = normalizedTTY(agent.tty ?? agent.terminal), !tty.isEmpty {
+        let tty = normalizedTTY(agent.tty ?? agent.terminal)
+        let pid = agent.pid.map(String.init)
+        let cwd = normalizedCWD(agent.cwd)
+
+        if let tty, let pid {
+            return "\(agent.type.rawValue)|tty:\(tty)|pid:\(pid)"
+        }
+        if let tty, let cwd {
+            return "\(agent.type.rawValue)|tty:\(tty)|cwd:\(cwd)"
+        }
+        if let pid, let cwd {
+            return "\(agent.type.rawValue)|pid:\(pid)|cwd:\(cwd)"
+        }
+        if let tty {
             return "\(agent.type.rawValue)|tty:\(tty)"
         }
-        if let pid = agent.pid {
+        if let pid {
             return "\(agent.type.rawValue)|pid:\(pid)"
         }
-        if let cwd = agent.cwd?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !cwd.isEmpty {
+        if let cwd {
             return "\(agent.type.rawValue)|cwd:\(cwd)"
         }
         return "\(agent.type.rawValue)|name:\(agent.name.lowercased())"
@@ -530,6 +585,13 @@ class SocketService: ObservableObject {
         if trimmed.hasPrefix("/dev/") {
             return String(trimmed.dropFirst("/dev/".count))
         }
+        return trimmed
+    }
+
+    private func normalizedCWD(_ cwd: String?) -> String? {
+        guard let cwd else { return nil }
+        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
         return trimmed
     }
 
@@ -558,6 +620,11 @@ class SocketService: ObservableObject {
     private func refreshInteractivePrompts(for agents: [Agent]) {
         let candidates = agents.filter(shouldInspectInteractivePrompt)
         guard !candidates.isEmpty else { return }
+        let cachedFingerprints = Dictionary(
+            uniqueKeysWithValues: candidates.compactMap { agent in
+                promptCache[agent.id].map { (agent.id, $0.fingerprint) }
+            }
+        )
 
         processQueue.async { [weak self] in
             guard let self else { return }
@@ -565,7 +632,7 @@ class SocketService: ObservableObject {
             var updates: [(String, String, InteractivePrompt?)] = []
             for agent in candidates {
                 let fingerprint = self.promptFingerprint(for: agent)
-                if self.promptCache[agent.id]?.fingerprint == fingerprint {
+                if cachedFingerprints[agent.id] == fingerprint {
                     continue
                 }
 
@@ -592,6 +659,7 @@ class SocketService: ObservableObject {
     }
 
     private func shouldInspectInteractivePrompt(agent: Agent) -> Bool {
+        guard UserDefaults.standard.bool(forKey: "OpenIsland.inlineTerminalPrompt.enabled") else { return false }
         guard !agent.needsPermission else { return false }
         guard protocolInteractivePromptIDs[agent.id] == nil else { return false }
         guard let tty = agent.tty, !tty.isEmpty else { return false }
@@ -1122,6 +1190,7 @@ private struct InteractionRequestPayload: Decodable {
         let command = metadata?["command"] ?? nil
         let filePath = metadata?["filePath"] ?? nil
         let permissionKey = metadata?["permissionKey"] ?? nil
+        let nonce = metadata?["nonce"] ?? nil
 
         return PermissionRequest(
             id: id,
@@ -1130,6 +1199,7 @@ private struct InteractionRequestPayload: Decodable {
             filePath: filePath,
             command: command,
             permissionKey: permissionKey,
+            nonce: nonce,
             timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
         )
     }
@@ -1169,6 +1239,7 @@ private struct PermissionRequestPayload: Decodable {
     let filePath: String?
     let command: String?
     let permissionKey: String?
+    let nonce: String?
     let timestamp: Double?
 
     func asPermissionRequest() -> PermissionRequest {
@@ -1179,6 +1250,7 @@ private struct PermissionRequestPayload: Decodable {
             filePath: filePath,
             command: command,
             permissionKey: permissionKey,
+            nonce: nonce,
             timestamp: timestamp.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
         )
     }
@@ -1189,12 +1261,24 @@ private struct PermissionResponseMessage: Encodable {
     let data: PermissionResponseData
 }
 
+private struct ClientHelloMessage: Encodable {
+    let type: String
+    let data: ClientHelloData
+}
+
+private struct ClientHelloData: Encodable {
+    let version: Int
+    let role: String
+    let token: String
+}
+
 private struct PermissionResponseData: Encodable {
     let agentId: String
     let requestId: String
     let allowed: Bool
     let scope: String
     let permissionKey: String?
+    let nonce: String?
 }
 
 // MARK: - Color Extension

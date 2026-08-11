@@ -18,6 +18,7 @@ final class UsageStore: ObservableObject {
     private var netMonitor: NWPathMonitor?
     private let netQueue = DispatchQueue(label: "OpenIsland.UsageStore.network")
     private var lastNetStatus: NWPath.Status?
+    private var pendingRefresh = false
 
     private init() {}
 
@@ -42,13 +43,19 @@ final class UsageStore: ObservableObject {
         netMonitor?.cancel()
         netMonitor = nil
         lastNetStatus = nil
+        pendingRefresh = false
         loading = false
         claudeReauthInProgress = false
     }
 
     func refresh() {
-        guard !loading else { return }
+        guard !loading else {
+            pendingRefresh = true
+            return
+        }
+
         loading = true
+        pendingRefresh = false
         refreshTask?.cancel()
         refreshTask = Task {
             async let claudeResult = UsageFetcher.fetchClaude()
@@ -57,6 +64,7 @@ final class UsageStore: ObservableObject {
 
             guard !Task.isCancelled else {
                 self.loading = false
+                self.consumePendingRefreshIfNeeded()
                 return
             }
 
@@ -68,6 +76,7 @@ final class UsageStore: ObservableObject {
             }
             lastUpdated = Date()
             loading = false
+            consumePendingRefreshIfNeeded()
         }
     }
 
@@ -128,5 +137,12 @@ final class UsageStore: ObservableObject {
         }
         monitor.start(queue: netQueue)
         netMonitor = monitor
+    }
+
+    /// Runs exactly one queued refresh after the current request finishes, so overlapping triggers coalesce.
+    private func consumePendingRefreshIfNeeded() {
+        guard pendingRefresh else { return }
+        pendingRefresh = false
+        refresh()
     }
 }

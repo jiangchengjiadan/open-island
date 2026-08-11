@@ -21,7 +21,8 @@ let package = Package(
             sources: ["."],
             resources: [
                 .copy("AppRuntime/bridge"),
-                .copy("AppRuntime/scripts")
+                .copy("AppRuntime/scripts"),
+                .copy("AppRuntime/runtime-manifest.json")
             ]
         )
     ]

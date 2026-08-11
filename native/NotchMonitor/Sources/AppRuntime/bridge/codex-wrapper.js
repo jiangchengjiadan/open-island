@@ -15,10 +15,11 @@ const {
   writeTerminalTitle
 } = require('./utils');
 
-const SOCKET_PATH = '/tmp/notch-monitor.sock';
+const SOCKET_PATH = process.env.NOTCH_MONITOR_SOCKET_PATH || `/tmp/open-island-${process.getuid()}.sock`;
 const LOG_PATH = '/tmp/notch-monitor-codex-wrapper.log';
 
 function log(message) {
+  if (process.env.NOTCH_MONITOR_DEBUG !== '1') return;
   try {
     fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
   } catch (_) {}
@@ -42,6 +43,7 @@ class BridgeClient {
     return new Promise((resolve, reject) => {
       this.socket = net.createConnection(SOCKET_PATH, () => {
         this.connected = true;
+        this.send({ type: 'hello', data: { version: 1, role: 'wrapper' } });
         resolve();
       });
 
@@ -110,12 +112,12 @@ async function main() {
     needsPermission: false,
   };
 
-  if (terminalTitleToken) {
+  if (process.env.NOTCH_MONITOR_SET_TERMINAL_TITLE === '1' && terminalTitleToken) {
     const wroteTitle = writeTerminalTitle(`${cwdName} · ${terminalTitleToken}`);
     log(`terminal title token=${terminalTitleToken} wrote=${wroteTitle}`);
   }
 
-  log(`launch wrapper pid=${process.pid} cwd=${process.cwd()} real=${realBinary} args=${JSON.stringify(codexArgs)} envHints=${JSON.stringify(agent.environmentHints)} jetbrains=${JSON.stringify(agent.jetbrainsContext)} chain=${JSON.stringify(agent.processChain)}`);
+  log(`launch wrapper pid=${process.pid} argsCount=${codexArgs.length}`);
 
   const child = spawn(realBinary, codexArgs, {
     stdio: 'inherit',
@@ -125,7 +127,7 @@ async function main() {
   agent.pid = child.pid ?? process.pid;
   agent.terminalTitleToken = isJetBrainsTerminal() ? terminalTitleTokenFor('codex', agent.pid) : agent.terminalTitleToken;
 
-  if (agent.terminalTitleToken) {
+  if (process.env.NOTCH_MONITOR_SET_TERMINAL_TITLE === '1' && agent.terminalTitleToken) {
     const wroteChildTitle = writeTerminalTitle(`${cwdName} · ${agent.terminalTitleToken}`);
     log(`terminal title updated token=${agent.terminalTitleToken} wrote=${wroteChildTitle}`);
   }
@@ -163,7 +165,7 @@ async function main() {
     }
   };
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  // The child shares the foreground process group and receives terminal signals directly.
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   child.on('exit', (code, signal) => {

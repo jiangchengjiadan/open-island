@@ -145,6 +145,7 @@ struct PermissionRequest: Codable {
     let filePath: String?
     let command: String?
     let permissionKey: String?
+    let nonce: String?
     let timestamp: Date
 }
 

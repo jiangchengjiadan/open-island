@@ -1,6 +1,8 @@
 import Foundation
 import Combine
 import AppKit
+import Darwin
+import CryptoKit
 
 final class AppBootstrapService: ObservableObject {
     static let shared = AppBootstrapService()
@@ -15,10 +17,9 @@ final class AppBootstrapService: ObservableObject {
     private var bridgeProcess: Process?
     private var diagnosticsTimer: Timer?
     private var didStart = false
-    private var lastAutoRepairAt: Date?
+    private var desiredBridgeRunning = false
     private let onboardingSuppressedKey = "OpenIslandOnboardingSuppressed"
     private let onboardingSeenKey = "OpenIslandOnboardingSeen"
-    private let autoRepairCooldown: TimeInterval = 20
 
     private init() {
         refreshDiagnostics()
@@ -57,7 +58,7 @@ final class AppBootstrapService: ObservableObject {
         shouldPresentOnboarding = true
         UserDefaults.standard.set(false, forKey: onboardingSuppressedKey)
         UserDefaults.standard.set(true, forKey: onboardingSeenKey)
-        runBootstrap()
+        runBootstrap(forceRestart: true)
     }
 
     func refreshDiagnostics() {
@@ -65,7 +66,6 @@ final class AppBootstrapService: ObservableObject {
         DispatchQueue.main.async {
             self.checks = nextChecks
             self.requestOnboardingPresentationIfNeeded()
-            self.scheduleAutoRepairIfNeeded(for: nextChecks)
         }
     }
 
@@ -110,13 +110,21 @@ final class AppBootstrapService: ObservableObject {
     }
 
     func stop() {
+        didStart = false
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
-        bridgeProcess?.terminate()
-        bridgeProcess = nil
+        runtimeQueue.sync {
+            desiredBridgeRunning = false
+            if let process = bridgeProcess {
+                process.terminationHandler = nil
+                _ = stopBridgeProcess(process)
+            }
+            bridgeProcess = nil
+        }
+        isBridgeRunning = false
     }
 
-    private func runBootstrap() {
+    private func runBootstrap(forceRestart: Bool = false) {
         DispatchQueue.main.async {
             self.isBootstrapping = true
             self.lastBootstrapError = nil
@@ -124,44 +132,9 @@ final class AppBootstrapService: ObservableObject {
         }
 
         runtimeQueue.async {
-            self.installToolingIfPossible()
-            self.startBridgeIfPossible()
+            self.desiredBridgeRunning = true
+            self.startBridgeIfPossible(forceRestart: forceRestart)
             self.finishBootstrap()
-        }
-    }
-
-    private func scheduleAutoRepairIfNeeded(for checks: [BootstrapCheck]) {
-        guard shouldAutoRepair(for: checks) else { return }
-
-        let now = Date()
-        if let lastAutoRepairAt, now.timeIntervalSince(lastAutoRepairAt) < autoRepairCooldown {
-            return
-        }
-
-        lastAutoRepairAt = now
-        runtimeQueue.async {
-            self.installToolingIfPossible()
-            self.startBridgeIfPossible(forceRestart: true)
-            DispatchQueue.main.async {
-                self.refreshDiagnostics()
-            }
-        }
-    }
-
-    private func shouldAutoRepair(for checks: [BootstrapCheck]) -> Bool {
-        guard didStart else { return false }
-        guard !isBootstrapping else { return false }
-        guard nodeInvocation() != nil else { return false }
-
-        let repairableCheckIDs: Set<String> = [
-            "claude-hooks",
-            "codex-hooks",
-            "codex-wrapper",
-            "bridge",
-        ]
-
-        return checks.contains { check in
-            repairableCheckIDs.contains(check.id) && check.state != .ready
         }
     }
 
@@ -203,8 +176,18 @@ final class AppBootstrapService: ObservableObject {
     }
 
     private func startBridgeIfPossible(forceRestart: Bool = false) {
+        guard desiredBridgeRunning else { return }
+        guard validateRuntimeManifest() else {
+            noteBootstrapError("Bundled runtime integrity validation failed")
+            return
+        }
         if forceRestart, bridgeProcess?.isRunning == true {
-            bridgeProcess?.terminate()
+            guard let process = bridgeProcess else { return }
+            process.terminationHandler = nil
+            guard stopBridgeProcess(process) else {
+                noteBootstrapError("Existing bridge did not exit; refusing to start a second instance")
+                return
+            }
             bridgeProcess = nil
             DispatchQueue.main.async {
                 self.isBridgeRunning = false
@@ -224,14 +207,21 @@ final class AppBootstrapService: ObservableObject {
         }
 
         let process = Process()
+        let capabilityPipe = Pipe()
         process.executableURL = nodeInvocation.executableURL
         process.arguments = nodeInvocation.arguments + [bridgeScript.path]
-        process.environment = runtimeEnvironment()
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        var environment = runtimeEnvironment()
+        environment["NOTCH_MONITOR_UI_TOKEN_FD"] = "0"
+        process.environment = environment
+        process.standardInput = capabilityPipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
+            capabilityPipe.fileHandleForReading.closeFile()
+            capabilityPipe.fileHandleForWriting.write(Data(RuntimeSecurity.uiCapability.utf8))
+            capabilityPipe.fileHandleForWriting.closeFile()
             bridgeProcess = process
             DispatchQueue.main.async {
                 self.isBridgeRunning = true
@@ -239,21 +229,43 @@ final class AppBootstrapService: ObservableObject {
             print("OpenIsland bootstrap: bridge started")
 
             process.terminationHandler = { [weak self] terminatedProcess in
-                print("OpenIsland bootstrap: bridge exited with status \(terminatedProcess.terminationStatus)")
-                self?.bridgeProcess = nil
-                DispatchQueue.main.async {
-                    self?.isBridgeRunning = false
+                self?.runtimeQueue.async {
+                    guard let self, self.bridgeProcess === terminatedProcess else { return }
+                    print("OpenIsland bootstrap: bridge exited with status \(terminatedProcess.terminationStatus)")
+                    self.bridgeProcess = nil
+                    DispatchQueue.main.async {
+                        self.isBridgeRunning = false
+                    }
+                    self.noteBootstrapError("Bridge exited with status \(terminatedProcess.terminationStatus)")
+                    self.refreshDiagnostics()
                 }
-                self?.noteBootstrapError("Bridge exited with status \(terminatedProcess.terminationStatus)")
-                self?.refreshDiagnostics()
             }
         } catch {
+            capabilityPipe.fileHandleForReading.closeFile()
+            capabilityPipe.fileHandleForWriting.closeFile()
             DispatchQueue.main.async {
                 self.isBridgeRunning = false
             }
             noteBootstrapError("Failed to start the local bridge")
             print("OpenIsland bootstrap: failed to start bridge - \(error.localizedDescription)")
         }
+    }
+
+    private func stopBridgeProcess(_ process: Process, grace: TimeInterval = 2) -> Bool {
+        guard process.isRunning else { return true }
+        process.terminate()
+        var deadline = Date().addingTimeInterval(grace)
+        while process.isRunning && Date() < deadline {
+            usleep(20_000)
+        }
+        guard process.isRunning else { return true }
+
+        guard kill(process.processIdentifier, SIGKILL) == 0 || errno == ESRCH else { return false }
+        deadline = Date().addingTimeInterval(1)
+        while process.isRunning && Date() < deadline {
+            usleep(20_000)
+        }
+        return !process.isRunning
     }
 
     private func runNodeScript(nodeInvocation: NodeInvocation, scriptURL: URL) {
@@ -314,6 +326,25 @@ final class AppBootstrapService: ObservableObject {
         resourceBaseURL()?.appendingPathComponent("scripts").appendingPathComponent(name)
     }
 
+    private func validateRuntimeManifest() -> Bool {
+        guard let baseURL = resourceBaseURL() else { return false }
+        let manifestURL = baseURL.appendingPathComponent("runtime-manifest.json")
+        guard
+            let data = try? Data(contentsOf: manifestURL),
+            let manifest = try? JSONDecoder().decode(RuntimeManifest.self, from: data),
+            manifest.version == 1,
+            manifest.protocolVersion == 1
+        else { return false }
+
+        for (relativePath, expectedHash) in manifest.files {
+            let fileURL = baseURL.appendingPathComponent(relativePath)
+            guard let fileData = try? Data(contentsOf: fileURL) else { return false }
+            let actualHash = SHA256.hash(data: fileData).map { String(format: "%02x", $0) }.joined()
+            guard actualHash == expectedHash else { return false }
+        }
+        return true
+    }
+
     private func resourceBaseURL() -> URL? {
         if let resourcesURL = Bundle.main.resourceURL?.appendingPathComponent("AppRuntime"),
            FileManager.default.fileExists(atPath: resourcesURL.path) {
@@ -345,7 +376,7 @@ final class AppBootstrapService: ObservableObject {
         let codexWrapperInstalled = codexWrapperExists()
         let pathConfigured = shellConfigMentionsLocalBin() || currentEnvironmentContainsLocalBin()
         let socketReachable = SocketService.shared.isConnected
-        let bridgeRunning = bridgeProcess?.isRunning == true
+        let bridgeRunning = isBridgeRunning
 
         return [
             BootstrapCheck(
@@ -375,8 +406,8 @@ final class AppBootstrapService: ObservableObject {
                     ? "New Claude Code sessions will register automatically."
                     : "Open Island could not confirm the Claude hook in ~/.claude/settings.json.",
                 state: claudeInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .retrySetup,
-                actionTitle: claudeInstalled ? "Reinstall" : "Install"
+                action: .recheck,
+                actionTitle: "Recheck"
             ),
             BootstrapCheck(
                 id: "codex-wrapper",
@@ -385,8 +416,8 @@ final class AppBootstrapService: ObservableObject {
                     ? "New Codex sessions can register silently through ~/.local/bin/codex."
                     : "Open Island could not confirm the managed Codex wrapper in ~/.local/bin/codex.",
                 state: codexWrapperInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .retrySetup,
-                actionTitle: codexWrapperInstalled ? "Reinstall" : "Install"
+                action: .recheck,
+                actionTitle: "Recheck"
             ),
             BootstrapCheck(
                 id: "codex-hooks",
@@ -395,8 +426,8 @@ final class AppBootstrapService: ObservableObject {
                     ? "Codex permission and lifecycle events should reach Open Island automatically."
                     : "Open Island could not confirm the managed Codex hooks in ~/.codex/hooks.json.",
                 state: codexHooksInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .retrySetup,
-                actionTitle: codexHooksInstalled ? "Reinstall" : "Install"
+                action: .recheck,
+                actionTitle: "Recheck"
             ),
             BootstrapCheck(
                 id: "shell-path",
@@ -412,7 +443,7 @@ final class AppBootstrapService: ObservableObject {
                 id: "bridge",
                 title: socketReachable ? "Local bridge connected" : (bridgeRunning ? "Waiting for bridge connection" : "Start the local bridge"),
                 detail: socketReachable
-                    ? "The app is connected to /tmp/notch-monitor.sock."
+                    ? "The app is connected to its private local bridge socket."
                     : (bridgeRunning
                         ? "The bridge process is running, but the app has not connected yet."
                         : bridgeFailureDetail()),
@@ -511,4 +542,10 @@ final class AppBootstrapService: ObservableObject {
 private struct NodeInvocation {
     let executableURL: URL
     let arguments: [String]
+}
+
+private struct RuntimeManifest: Decodable {
+    let version: Int
+    let protocolVersion: Int
+    let files: [String: String]
 }

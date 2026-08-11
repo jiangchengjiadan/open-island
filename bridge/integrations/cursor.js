@@ -44,9 +44,9 @@ function sessionName(source, payload, env, fallback) {
   ]);
 }
 
-function permissionOutput() {
+function permissionOutput(eventName, allowed) {
   return {
-    continue: true,
+    continue: Boolean(allowed),
   };
 }
 

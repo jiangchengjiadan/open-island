@@ -27,9 +27,23 @@ jobs:
 
       - name: Check bridge scripts
         run: |
+          chmod +x scripts/sync-app-runtime.sh
+          ./scripts/sync-app-runtime.sh
+          git diff --exit-code -- native/NotchMonitor/Sources/AppRuntime
           node --check bridge/server.js
           node --check bridge/hook.js
           node --check bridge/codex-wrapper.js
+          node --check bridge/utils.js
+          node --check bridge/integrations/*.js
+          node --check native/NotchMonitor/Sources/AppRuntime/bridge/server.js
+          node --check native/NotchMonitor/Sources/AppRuntime/bridge/hook.js
+          node --check native/NotchMonitor/Sources/AppRuntime/bridge/codex-wrapper.js
+          node --check native/NotchMonitor/Sources/AppRuntime/bridge/utils.js
+          node --check native/NotchMonitor/Sources/AppRuntime/bridge/integrations/*.js
+
+      - name: Test bridge
+        run: npm test
+        working-directory: bridge
 
       - name: Build Swift app
         run: swift build
