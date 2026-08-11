@@ -633,6 +633,7 @@ struct DiagnosticCheckRow: View {
 
 struct CompactAgentRow: View {
     let agent: Agent
+    @ObservedObject private var socketService = SocketService.shared
     @State private var isHovering = false
 
     var body: some View {
@@ -671,6 +672,7 @@ struct CompactAgentRow: View {
             if let request = agent.permissionRequest, agent.needsPermission {
                 InlineApprovalBar(
                     request: request,
+                    isSubmitting: socketService.submittingPermissionRequestIDs.contains(request.id),
                     onAllow: { respondToPermission(agent.id, allowed: true) },
                     onAllowSimilar: { respondToPermission(agent.id, allowed: true, scope: "session_similar") },
                     onDeny: { respondToPermission(agent.id, allowed: false) }
@@ -717,6 +719,7 @@ struct CompactAgentRow: View {
                 }
             }
         }
+        .disabled(agent.permissionRequest.map { socketService.submittingPermissionRequestIDs.contains($0.id) } ?? false)
     }
 
     private var primaryTitle: String {
@@ -865,13 +868,14 @@ struct CompactAgentRow: View {
 
 struct InlineApprovalBar: View {
     let request: PermissionRequest
+    let isSubmitting: Bool
     let onAllow: () -> Void
     let onAllowSimilar: () -> Void
     let onDeny: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(request.type)
+            Text(isSubmitting ? "Submitting…" : request.type)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundColor(Color(hex: "#f5c36b"))
                 .padding(.horizontal, 9)
@@ -885,6 +889,7 @@ struct InlineApprovalBar: View {
             InlineActionButton(title: "Allow Similar", tint: Color(hex: "#f5c36b"), foreground: Color(hex: "#2a1805"), action: onAllowSimilar)
                 .help("Approve matching requests in this session")
         }
+        .disabled(isSubmitting)
     }
 }
 

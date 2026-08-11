@@ -148,10 +148,12 @@ Open Island 仍然是 early preview，但已经可以用于以 Terminal、iTerm�
 ### 安装本地 hooks 和启动器
 
 ```bash
-./scripts/install-hooks.sh
+OPEN_ISLAND_TOOLS=claude,cursor ./scripts/install-hooks.sh
 ```
 
-这一步会安装 Claude、Cursor、Gemini、Qoder、Codex 的 hooks，以及 Codex wrapper 和 `open-island` 启动器。
+通过 `OPEN_ISLAND_TOOLS` 显式选择集成。可选值为 `claude`、`cursor`、`gemini`、`qoder`、`codex`，以及独立的 `codex-wrapper`。安装器会先展示绑定当前配置 hash 的计划，并在应用前请求确认；Open Island 应用本身不会自动安装任何集成。
+
+阻断型审批仍属于实验能力，在完成各 vendor 的端到端契约验证前默认关闭。审阅计划后，可在安装时显式设置 `NOTCH_MONITOR_ENABLE_BLOCKING_APPROVALS=1`，把实验性阻断开关写入支持的 hook 命令。
 
 然后使用：
 
@@ -188,7 +190,7 @@ SwiftUI + AppKit 刘海面板
 Terminal / iTerm / IDE
 ```
 
-Bridge 只在本地通信。如果 Open Island 没有运行，Agent 工作流应该继续照常执行；hooks 的定位是轻量观察层，而不是强依赖。
+Bridge 只在本地通信。被动事件和 monitor-only 集成在 Bridge 不可用时会继续正常工作；已经验证为阻断型的审批事件会 fail closed，避免 Bridge 不可用时静默放行。Cursor 和 Gemini 在官方阻断契约完成验证前保持 monitor-only。
 
 ## 打包构建
 
@@ -240,7 +242,7 @@ open-island start
 
 ## 最近完成
 
-- Codex hooks 改为默认安装
+- 集成改为逐工具显式选择，Codex hooks 不再默认安装
 - Codex 权限 hook 返回格式已兼容当前 CLI
 - Codex 主会话和辅助进程去重收紧
 - bridge 新增 stale session cleanup 和 permission request 排队

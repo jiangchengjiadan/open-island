@@ -26,7 +26,7 @@ struct OnboardingSetupView: View {
 
                 HStack(spacing: 10) {
                     statusPill(title: blockingCount > 0 ? "\(blockingCount) required" : "No blockers", tint: blockingCount > 0 ? Color(hex: "#f59e0b") : Color(hex: "#22c55e"))
-                    statusPill(title: bootstrapService.isBootstrapping ? "Installing" : "Monitoring", tint: bootstrapService.isBootstrapping ? Color(hex: "#60a5fa") : Color(hex: "#94a3b8"))
+                    statusPill(title: bootstrapService.isBootstrapping ? "Starting bridge" : "Monitoring", tint: bootstrapService.isBootstrapping ? Color(hex: "#60a5fa") : Color(hex: "#94a3b8"))
                 }
             }
             .padding(.horizontal, 24)
@@ -45,7 +45,7 @@ struct OnboardingSetupView: View {
             Spacer(minLength: 18)
 
             HStack(spacing: 12) {
-                Button("Run Setup Again") {
+                Button("Restart Bridge") {
                     AppBootstrapService.shared.retrySetup()
                 }
                 .buttonStyle(SetupPrimaryButtonStyle())
@@ -99,14 +99,14 @@ struct OnboardingSetupView: View {
 
     private var subtitle: String {
         if blockingCount > 0 {
-            return "Finish the required steps below so new Claude Code and Codex sessions can register, approve actions, and jump back reliably."
+            return "Finish the required steps below. Tool integrations are never installed automatically; review and run the repository installer explicitly when needed."
         }
-        return "Open Island is installed. These checks show whether hooks, wrapper, permissions, and the local bridge are all in a healthy state."
+        return "These checks report integration and bridge health without changing your tool configuration."
     }
 
     private var footerText: String {
         if bootstrapService.isBootstrapping {
-            return "Applying local setup"
+            return "Starting the local bridge"
         }
         return blockingCount > 0 ? "Setup still needs attention" : "Setup looks healthy"
     }

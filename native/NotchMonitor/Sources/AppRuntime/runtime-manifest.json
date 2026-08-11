@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "protocolVersion": 1,
+  "files": {
+    "bridge/server.js": "a232e841582b0ba796427257924c29b7474ace813c7e411af85464216b4d63d2",
+    "bridge/hook.js": "bc6516ece8d7911b5f9bc3818f5d9b77000e6bd74468bfc6d468bb8ec4300c91",
+    "bridge/codex-wrapper.js": "4c427512723fa557436c694df258be71e23b9cf48829c0cc09cbb4c719d00ca9",
+    "bridge/utils.js": "60195ed92bd69bb4a47d9f5af6af8d59995288128f471fe5340696235c6540ae",
+    "bridge/integrations/index.js": "d56d1c43a9de572970e5a3d44fabab20bf5c98b7ca17bbc8c7bb1cbf00572064",
+    "bridge/integrations/claude-family.js": "79ebe91be3e170e8f2d83cdb1d59ada8c28fe14fdffcb4f450d0fd33fc729f22",
+    "bridge/integrations/codex.js": "bb10f90fc7887a0ea8479f071b990a864a16a7e30d61af605869735fc3a23b71",
+    "bridge/integrations/cursor.js": "7a6c0ed579bcaf1cc866285df9de20810d109e2e1f764343a349269f045882aa",
+    "bridge/integrations/gemini.js": "248e2a2f3dc6d989f8a6204d9729908fc957decdd43dc4fc6ae218e6200993eb",
+    "scripts/auto-install-hooks.js": "536bcfcd2c9971d617f71dc702e4e44fab69a6784442be9c04639a02895ac1e5",
+    "scripts/install-codex-wrapper.js": "7a9ee30df1fb2ca9418cfa70945c1296cf029094dd512165d2222470977d3c21"
+  }
+}

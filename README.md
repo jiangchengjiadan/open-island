@@ -148,10 +148,12 @@ Near-term focus:
 ### Install local hooks and launcher
 
 ```bash
-./scripts/install-hooks.sh
+OPEN_ISLAND_TOOLS=claude,cursor ./scripts/install-hooks.sh
 ```
 
-This installs Claude, Cursor, Gemini, Qoder, and Codex hooks, the Codex wrapper, and the `open-island` launcher.
+Choose integrations explicitly with `OPEN_ISLAND_TOOLS`. Supported values are `claude`, `cursor`, `gemini`, `qoder`, `codex`, and the separate `codex-wrapper`. The installer prints a hash-bound plan and asks for confirmation before applying it. Open Island itself never installs integrations automatically.
+
+Blocking approvals are experimental and disabled by default until each vendor contract has an end-to-end verification. To include the experimental blocking flag in supported hook commands, run the installer with `NOTCH_MONITOR_ENABLE_BLOCKING_APPROVALS=1` after reviewing the plan.
 
 Then use:
 
@@ -188,7 +190,7 @@ SwiftUI + AppKit notch panel
 Terminal / iTerm / IDE
 ```
 
-The bridge is local-only. If Open Island is not running, the agent workflow should continue normally; hooks are designed to be a lightweight observation layer rather than a hard dependency.
+The bridge is local-only. Passive and monitor-only events continue normally when it is unavailable. Verified blocking approval events fail closed so an unavailable bridge cannot silently approve a protected operation. Cursor and Gemini remain monitor-only until their vendor blocking contracts are verified.
 
 ## Packaged Builds
 
@@ -240,7 +242,7 @@ open-island start
 
 ## Recent Work
 
-- Codex hooks are installed by default
+- Integrations require explicit per-tool selection; Codex hooks are not installed by default
 - Codex permission hooks were updated for current CLI compatibility
 - Codex auxiliary process/session de-duplication was tightened
 - stale session cleanup and permission-request queueing were added to the bridge

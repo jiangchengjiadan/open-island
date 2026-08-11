@@ -481,6 +481,7 @@ enum TerminalJumpService {
     }
 
     private static func log(_ message: String) {
+        guard ProcessInfo.processInfo.environment["NOTCH_MONITOR_DEBUG"] == "1" else { return }
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
         if let data = line.data(using: .utf8) {
             if FileManager.default.fileExists(atPath: logURL.path) {

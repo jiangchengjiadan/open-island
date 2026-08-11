@@ -12,8 +12,9 @@ function slug(text, fallback = 'session') {
     .replace(/^-+|-+$/g, '') || fallback;
 }
 
-function terminalOf() {
-  const inferredApp = inferredTerminalApp(processChainOf(process.pid));
+function terminalOf(options = {}) {
+  const processChainStartPid = options.processChainStartPid ?? process.pid;
+  const inferredApp = inferredTerminalApp(processChainOf(processChainStartPid));
   if (inferredApp) {
     return inferredApp;
   }
@@ -85,15 +86,42 @@ function inferredTerminalApp(processChain) {
   return '';
 }
 
-function ttyOf() {
+function ttyOf(options = {}) {
+  const terminalOptions = options.terminalOptions || {};
+  const parentPid = options.parentPid ?? process.ppid;
+  const preferParentTTY = options.preferParentTTY === true;
+
   try {
     const tty = execFileSync('/usr/bin/tty', [], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'ignore'] }).trim();
     if (!tty || tty === 'not a tty') {
-      return terminalOf();
+      if (preferParentTTY) {
+        const parentTTY = parentTTYOf(parentPid);
+        return parentTTY || terminalOf(terminalOptions);
+      }
+      return terminalOf(terminalOptions);
     }
     return tty.replace('/dev/', '');
   } catch (_) {
-    return terminalOf();
+    if (preferParentTTY) {
+      const parentTTY = parentTTYOf(parentPid);
+      return parentTTY || terminalOf(terminalOptions);
+    }
+    return terminalOf(terminalOptions);
+  }
+}
+
+function parentTTYOf(pid = process.ppid) {
+  try {
+    const tty = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'tty='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!tty || tty === '??') {
+      return '';
+    }
+    return tty;
+  } catch (_) {
+    return '';
   }
 }
 
@@ -192,26 +220,26 @@ function isJetBrainsTerminal() {
   return marker.includes('jediterm') || marker.includes('jetbrains') || marker.includes('idea') || marker.includes('pycharm');
 }
 
-function normalizedTTY() {
-  const tty = ttyOf();
+function normalizedTTY(options = {}) {
+  const tty = ttyOf(options);
   return tty.replace(/^\/dev\//, '');
 }
 
-function ttyDevicePath() {
-  const tty = normalizedTTY();
+function ttyDevicePath(options = {}) {
+  const tty = normalizedTTY(options);
   if (!tty.startsWith('ttys') && !tty.startsWith('pts/')) {
     return null;
   }
   return `/dev/${tty}`;
 }
 
-function terminalTitleTokenFor(source, pid, sessionId = '') {
+function terminalTitleTokenFor(source, pid, sessionId = '', options = {}) {
   const sessionPart = slug(sessionId || 'session').slice(0, 12);
-  return `OI ${source} ${normalizedTTY()} p${pid} ${sessionPart}`;
+  return `OI ${source} ${normalizedTTY(options)} p${pid} ${sessionPart}`;
 }
 
-function writeTerminalTitle(title) {
-  const ttyPath = ttyDevicePath();
+function writeTerminalTitle(title, options = {}) {
+  const ttyPath = ttyDevicePath(options);
   if (!ttyPath) return false;
 
   try {
@@ -247,6 +275,7 @@ module.exports = {
   tmuxTargetOf,
   inferredTerminalApp,
   ttyOf,
+  parentTTYOf,
   processInfoOf,
   processChainOf,
   collectEnvHints,

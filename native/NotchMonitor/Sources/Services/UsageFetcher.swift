@@ -388,12 +388,15 @@ enum ClaudeCredentials {
             return false
         }
 
+        guard let scriptURL = writeClaudeReauthScript(binaryPath: path) else {
+            return false
+        }
+
         let task = Process()
-        task.launchPath = path
-        task.arguments = ["auth", "login"]
+        task.launchPath = "/usr/bin/open"
+        task.arguments = ["-a", "Terminal", scriptURL.path]
         task.standardOutput = Pipe()
         task.standardError = Pipe()
-        task.standardInput = Pipe()
 
         do {
             try task.run()
@@ -402,6 +405,36 @@ enum ClaudeCredentials {
             NSLog("OpenIsland: failed to spawn claude auth login: %@", error.localizedDescription)
             return false
         }
+    }
+
+    /// Launches Claude re-auth in a real Terminal session so the CLI still has a TTY.
+    private static func writeClaudeReauthScript(binaryPath: String) -> URL? {
+        let tempDirectory = FileManager.default.temporaryDirectory
+        let scriptURL = tempDirectory.appendingPathComponent("open-island-claude-reauth.sh")
+        let script = """
+        #!/bin/bash
+        clear
+        echo "Open Island launched Claude re-authentication."
+        echo ""
+        exec \(shellQuoted(binaryPath)) auth login
+        """
+
+        do {
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path
+            )
+            return scriptURL
+        } catch {
+            NSLog("OpenIsland: failed to prepare Claude reauth script: %@", error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// Performs the minimal shell escaping needed for a binary path embedded in a script.
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private static func locateClaudeBinary() -> String? {

@@ -262,9 +262,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("辅助功能权限状态: \(hasPermission ? "已授权" : "未授权")")
 
         if !hasPermission {
-            // 请求权限
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
             print("需要辅助功能权限才能启用鼠标悬停展开功能")
             print("请在系统偏好设置 > 隐私与安全性 > 辅助功能 中授权")
             print("授权后请重启应用")
@@ -954,7 +951,7 @@ class NotchPanelWindow: NSPanel {
         let rowsHeight = visibleAgents.reduce(CGFloat(0)) { total, agent in
             total + expandedRowHeight(for: agent)
         }
-        let height = max(286, 16 + rowsHeight)
+        let height = max(286, 64 + rowsHeight)
         return NSSize(width: expandedWidth, height: height)
     }
 
