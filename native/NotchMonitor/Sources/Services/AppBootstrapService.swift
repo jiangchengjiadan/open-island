@@ -545,8 +545,13 @@ final class AppBootstrapService: ObservableObject {
         let pathConfigured = shellConfigMentionsLocalBin() || currentEnvironmentContainsLocalBin()
         let socketReachable = SocketService.shared.isConnected
         let bridgeRunning = isBridgeRunning
+        let tools = relevantTools(
+            claudeHookInstalled: claudeInstalled,
+            codexHookInstalled: codexHooksInstalled,
+            codexWrapperInstalled: codexWrapperInstalled
+        )
 
-        return [
+        var checks: [BootstrapCheck] = [
             BootstrapCheck(
                 id: "node",
                 title: nodeInstalled ? "Node.js is available" : "Install Node.js",
@@ -562,51 +567,64 @@ final class AppBootstrapService: ObservableObject {
                 title: accessibilityGranted ? "Accessibility permission granted" : "Grant Accessibility access",
                 detail: accessibilityGranted
                     ? "Jumping to Terminal, iTerm, and IDE windows is enabled."
-                    : "Open Island needs Accessibility permission for hover, jump, and approval interactions.",
-                state: accessibilityGranted ? .ready : .blocking,
+                    : "Recommended for hover-to-expand and jumping back to a terminal or IDE. The rest of Open Island still works without it.",
+                state: accessibilityGranted ? .ready : .warning,
                 action: accessibilityGranted ? .recheck : .openAccessibility,
                 actionTitle: accessibilityGranted ? "Recheck" : "Open Settings"
-            ),
-            BootstrapCheck(
-                id: "claude-hooks",
-                title: claudeInstalled ? "Claude hook is installed" : "Install Claude hook",
-                detail: claudeInstalled
-                    ? "New Claude Code sessions will register automatically."
-                    : "Open Island could not confirm the Claude hook in ~/.claude/settings.json.",
-                state: claudeInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .recheck,
-                actionTitle: "Recheck"
-            ),
-            BootstrapCheck(
-                id: "codex-wrapper",
-                title: codexWrapperInstalled ? "Codex wrapper is installed" : "Install Codex wrapper",
-                detail: codexWrapperInstalled
-                    ? "New Codex sessions can register silently through ~/.local/bin/codex."
-                    : "Open Island could not confirm the managed Codex wrapper in ~/.local/bin/codex.",
-                state: codexWrapperInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .recheck,
-                actionTitle: "Recheck"
-            ),
-            BootstrapCheck(
-                id: "codex-hooks",
-                title: codexHooksInstalled ? "Codex hooks are installed" : "Install Codex hooks",
-                detail: codexHooksInstalled
-                    ? "Codex permission and lifecycle events should reach Open Island automatically."
-                    : "Open Island could not confirm the managed Codex hooks in ~/.codex/hooks.json.",
-                state: codexHooksInstalled ? .ready : (nodeInstalled ? .warning : .blocking),
-                action: .recheck,
-                actionTitle: "Recheck"
-            ),
-            BootstrapCheck(
-                id: "shell-path",
-                title: pathConfigured ? "~/.local/bin is in shell startup" : "Add ~/.local/bin to shell startup",
-                detail: pathConfigured
-                    ? "New terminals should resolve the Codex wrapper automatically."
-                    : "New terminals may still bypass the wrapper. Add export PATH=\"$HOME/.local/bin:$PATH\" to ~/.zprofile or ~/.zshrc, then open a new shell.",
-                state: pathConfigured ? .ready : .warning,
-                action: .recheck,
-                actionTitle: "Recheck"
-            ),
+            )
+        ]
+
+        if tools.contains("claude") {
+            checks.append(
+                BootstrapCheck(
+                    id: "claude-hooks",
+                    title: claudeInstalled ? "Claude hook is installed" : "Install Claude hook",
+                    detail: claudeInstalled
+                        ? "New Claude Code sessions will register automatically."
+                        : "Open Island could not confirm the Claude hook in ~/.claude/settings.json.",
+                    state: claudeInstalled ? .ready : .warning,
+                    action: .recheck,
+                    actionTitle: "Recheck"
+                )
+            )
+        }
+
+        if tools.contains("codex") {
+            checks.append(contentsOf: [
+                BootstrapCheck(
+                    id: "codex-wrapper",
+                    title: codexWrapperInstalled ? "Codex wrapper is installed" : "Install Codex wrapper",
+                    detail: codexWrapperInstalled
+                        ? "New Codex sessions can register silently through ~/.local/bin/codex."
+                        : "Open Island could not confirm the managed Codex wrapper in ~/.local/bin/codex.",
+                    state: codexWrapperInstalled ? .ready : .warning,
+                    action: .recheck,
+                    actionTitle: "Recheck"
+                ),
+                BootstrapCheck(
+                    id: "codex-hooks",
+                    title: codexHooksInstalled ? "Codex hooks are installed" : "Install Codex hooks",
+                    detail: codexHooksInstalled
+                        ? "Codex permission and lifecycle events should reach Open Island automatically."
+                        : "Open Island could not confirm the managed Codex hooks in ~/.codex/hooks.json.",
+                    state: codexHooksInstalled ? .ready : .warning,
+                    action: .recheck,
+                    actionTitle: "Recheck"
+                ),
+                BootstrapCheck(
+                    id: "shell-path",
+                    title: pathConfigured ? "~/.local/bin is in shell startup" : "Add ~/.local/bin to shell startup",
+                    detail: pathConfigured
+                        ? "New terminals should resolve the Codex wrapper automatically."
+                        : "New terminals may still bypass the wrapper. Add export PATH=\"$HOME/.local/bin:$PATH\" to ~/.zprofile or ~/.zshrc, then open a new shell.",
+                    state: pathConfigured ? .ready : .warning,
+                    action: .recheck,
+                    actionTitle: "Recheck"
+                )
+            ])
+        }
+
+        checks.append(
             BootstrapCheck(
                 id: "bridge",
                 title: bridgeCheckTitle(socketReachable: socketReachable, bridgeRunning: bridgeRunning),
@@ -615,7 +633,91 @@ final class AppBootstrapService: ObservableObject {
                 action: .retrySetup,
                 actionTitle: socketReachable ? "Restart" : "Retry Setup"
             )
+        )
+        return checks
+    }
+
+    private func relevantTools(claudeHookInstalled: Bool, codexHookInstalled: Bool, codexWrapperInstalled: Bool) -> Set<String> {
+        let selected = parseToolList(ProcessInfo.processInfo.environment["OPEN_ISLAND_TOOLS"])
+        if !selected.isEmpty {
+            return selected
+        }
+
+        let manifest = hookManifestTools()
+        if !manifest.isEmpty {
+            return manifest
+        }
+
+        var installed = installedToolHints()
+        if claudeHookInstalled { installed.insert("claude") }
+        if codexHookInstalled || codexWrapperInstalled { installed.insert("codex") }
+        return installed
+    }
+
+    private func parseToolList(_ raw: String?) -> Set<String> {
+        guard let raw else { return [] }
+        var tools = Set<String>()
+        for part in raw.split(separator: ",") {
+            let tool = part.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if tool.isEmpty { continue }
+            if tool == "codex-wrapper" {
+                tools.insert("codex")
+            } else {
+                tools.insert(tool)
+            }
+        }
+        return tools
+    }
+
+    private func hookManifestTools() -> Set<String> {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let stateHome = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+            ?? home.appendingPathComponent(".local/state").path
+        let manifestURL = URL(fileURLWithPath: stateHome)
+            .appendingPathComponent("open-island")
+            .appendingPathComponent("hook-manifest.json")
+        guard
+            let data = try? Data(contentsOf: manifestURL),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tools = json["tools"] as? [String]
+        else {
+            return []
+        }
+        return parseToolList(tools.joined(separator: ","))
+    }
+
+    private func installedToolHints() -> Set<String> {
+        var tools = Set<String>()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let fm = FileManager.default
+        if fm.fileExists(atPath: home.appendingPathComponent(".claude").path) || binaryExists("claude") {
+            tools.insert("claude")
+        }
+        if fm.fileExists(atPath: home.appendingPathComponent(".codex").path) || binaryExists("codex") {
+            tools.insert("codex")
+        }
+        if fm.fileExists(atPath: home.appendingPathComponent(".cursor").path) || fm.fileExists(atPath: "/Applications/Cursor.app") {
+            tools.insert("cursor")
+        }
+        if fm.fileExists(atPath: home.appendingPathComponent(".gemini").path) || binaryExists("gemini") {
+            tools.insert("gemini")
+        }
+        if fm.fileExists(atPath: home.appendingPathComponent(".qoder").path) || binaryExists("qoder") || binaryExists("qodercli") {
+            tools.insert("qoder")
+        }
+        return tools
+    }
+
+    private func binaryExists(_ name: String) -> Bool {
+        let fm = FileManager.default
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)",
+            home.appendingPathComponent(".local/bin/\(name)").path
         ]
+        return candidates.contains { fm.isExecutableFile(atPath: $0) }
     }
 
     private func claudeHookInstalled() -> Bool {

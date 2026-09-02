@@ -47,7 +47,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 自动安装 hooks / wrapper 并启动内置 bridge
         AppBootstrapService.shared.startIfNeeded()
-        UsageStore.shared.startAutoRefresh()
 
         // 等 bridge 起稳后再接 socket，避免 DMG 首启时 process fallback 和 socket 注册打架
         scheduleSocketStartup()

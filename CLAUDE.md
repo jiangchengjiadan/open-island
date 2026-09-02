@@ -68,7 +68,7 @@ open-island status           # Checks the app status
 ### Packaging
 To create a DMG for distribution:
 ```bash
-./scripts/package-dmg.sh [version]  # Creates a DMG file in dist/ directory (version defaults to 0.1.0)
+./scripts/package-dmg.sh [version]  # Creates a DMG file in dist/ directory (version defaults to 0.2.0)
 ```
 
 ## Message Protocol (Unix Socket JSON)

@@ -215,6 +215,12 @@ private struct UsagePanelView: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.white.opacity(0.055), lineWidth: 1)
         )
+        .onAppear {
+            UsageStore.shared.startAutoRefresh()
+        }
+        .onDisappear {
+            UsageStore.shared.stopAutoRefresh()
+        }
     }
 }
 
@@ -519,13 +525,13 @@ struct EmptyStateView: View {
 
     private var subheadline: String {
         if bootstrapService.hasBlockingIssue {
-            return "Open Island found a few setup gaps. Fix the required items below so new Claude and Codex sessions can register reliably."
+            return "Open Island found a few setup gaps. Fix the required items below so new sessions can register reliably."
         }
         if bootstrapService.isBootstrapping {
-            return "Installing hooks, wrapper, and local bridge support."
+            return "Starting the local bridge."
         }
         return socketService.isConnected
-            ? "Launch Claude Code, Codex, or Gemini CLI and they will appear here."
+            ? "Launch a configured agent and it will appear here."
             : "Waiting for the local bridge to reconnect."
     }
 
