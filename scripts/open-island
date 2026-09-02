@@ -1,0 +1,136 @@
+#!/bin/bash
+
+# Open Island launcher for a git checkout.
+# Installed as ~/.local/bin/open-island via scripts/install-hooks.sh.
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+NATIVE_DIR="$REPO_ROOT/native/NotchMonitor"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/open-island"
+APP_PID_FILE="$STATE_DIR/app.pid"
+PRODUCT_NAME="NotchMonitor"
+LOG_FILE="$STATE_DIR/app.log"
+
+mkdir -p "$STATE_DIR"
+
+is_pid_alive() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+read_recorded_pid() {
+    if [ -f "$APP_PID_FILE" ]; then
+        tr -d '[:space:]' < "$APP_PID_FILE"
+    fi
+}
+
+bin_path() {
+    local bin_dir
+    bin_dir="$(cd "$NATIVE_DIR" && swift build --show-bin-path --product "$PRODUCT_NAME" 2>/dev/null)" || return 1
+    printf '%s/%s\n' "$bin_dir" "$PRODUCT_NAME"
+}
+
+collect_app_pids() {
+    local pid
+    pid="$(read_recorded_pid)"
+    if is_pid_alive "$pid"; then
+        printf '%s\n' "$pid"
+    fi
+    pgrep -f "$NATIVE_DIR/.build/.*/$PRODUCT_NAME" 2>/dev/null || true
+}
+
+unique_pids() {
+    collect_app_pids | awk 'NF && !seen[$0]++'
+}
+
+is_running() {
+    [ -n "$(unique_pids)" ]
+}
+
+stop_pid() {
+    local pid="$1"
+    is_pid_alive "$pid" || return 0
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    local i
+    for i in $(seq 1 15); do
+        is_pid_alive "$pid" || return 0
+        sleep 0.2
+    done
+    kill -9 "$pid" 2>/dev/null || true
+}
+
+cmd_start() {
+    if is_running; then
+        echo "Open Island is already running"
+        return 0
+    fi
+
+    echo "Starting Open Island..."
+    cd "$NATIVE_DIR"
+    if ! swift build --product "$PRODUCT_NAME"; then
+        echo "Build failed" >&2
+        return 1
+    fi
+
+    local bin
+    bin="$(bin_path)"
+    if [ ! -x "$bin" ]; then
+        echo "Built binary not found: $bin" >&2
+        return 1
+    fi
+
+    nohup "$bin" >>"$LOG_FILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$APP_PID_FILE"
+    echo "Open Island started (pid $pid)"
+}
+
+cmd_stop() {
+    local pid
+    local any=0
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        any=1
+        stop_pid "$pid"
+    done < <(unique_pids)
+
+    rm -f "$APP_PID_FILE"
+
+    if [ "$any" -eq 1 ]; then
+        echo "Open Island stopped"
+    else
+        echo "Open Island is not running"
+    fi
+}
+
+cmd_status() {
+    local pids
+    pids="$(unique_pids)"
+    if [ -n "$pids" ]; then
+        echo "Open Island is running"
+        echo "$pids" | awk '{ print "pid " $0 }'
+    else
+        echo "Open Island is not running"
+        rm -f "$APP_PID_FILE"
+    fi
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+case "${1:-}" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    status) cmd_status ;;
+    *)
+        echo "Usage: open-island [start|stop|restart|status]"
+        exit 1
+        ;;
+esac

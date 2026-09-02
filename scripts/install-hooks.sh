@@ -88,56 +88,7 @@ create_launch_script() {
 
     cat > "$LAUNCH_SCRIPT" <<EOF
 #!/bin/bash
-
-# Open Island Launcher
-
-REPO_ROOT="$REPO_ROOT"
-BRIDGE_DIR="\$REPO_ROOT/bridge"
-NATIVE_DIR="\$REPO_ROOT/native/NotchMonitor"
-HOOK_INSTALLER="\$REPO_ROOT/scripts/auto-install-hooks.js"
-CODEX_WRAPPER_INSTALLER="\$REPO_ROOT/scripts/install-codex-wrapper.js"
-STATE_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/open-island"
-APP_PID_FILE="\$STATE_DIR/app.pid"
-
-case "\$1" in
-    start)
-        echo "Starting Open Island..."
-        mkdir -p "\$STATE_DIR"
-        cd "\$NATIVE_DIR"
-        swift package clean >/dev/null 2>&1 || true
-        swift run NotchMonitor &
-        echo \$! > "\$APP_PID_FILE"
-        ;;
-    
-    stop)
-        if [ -f "\$APP_PID_FILE" ]; then
-            APP_PID="\$(cat "\$APP_PID_FILE")"
-            if [[ "\$APP_PID" =~ ^[0-9]+$ ]]; then
-                kill "\$APP_PID" 2>/dev/null || true
-            fi
-            rm -f "\$APP_PID_FILE"
-        fi
-        ;;
-    
-    restart)
-        \$0 stop
-        sleep 1
-        \$0 start
-        ;;
-    
-    status)
-        if [ -f "\$APP_PID_FILE" ] && kill -0 "\$(cat "\$APP_PID_FILE")" 2>/dev/null; then
-            echo "Open Island is running"
-        else
-            echo "Open Island is not running"
-        fi
-        ;;
-    
-    *)
-        echo "Usage: open-island [start|stop|restart|status]"
-        exit 1
-        ;;
-esac
+exec "$REPO_ROOT/scripts/open-island" "\$@"
 EOF
 
     chmod +x "$LAUNCH_SCRIPT"
