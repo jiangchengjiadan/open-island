@@ -10,6 +10,8 @@ final class AppBootstrapService: ObservableObject {
     @Published private(set) var checks: [BootstrapCheck] = []
     @Published private(set) var isBootstrapping = false
     @Published private(set) var isBridgeRunning = false
+    @Published private(set) var isBridgeRestarting = false
+    @Published private(set) var didGiveUpOnBridge = false
     @Published private(set) var lastBootstrapError: String?
     @Published var shouldPresentOnboarding = false
 
@@ -18,8 +20,22 @@ final class AppBootstrapService: ObservableObject {
     private var diagnosticsTimer: Timer?
     private var didStart = false
     private var desiredBridgeRunning = false
+    private var bridgeGeneration: UInt64 = 0
+    private var consecutiveBridgeFailures = 0
+    private var bridgeStartedAt: Date?
+    private var restartWorkItem: DispatchWorkItem?
+    private var healthyResetWorkItem: DispatchWorkItem?
+    private var hasGivenUpOnBridge = false
+    private let bridgeSnapshotLock = NSLock()
+    private var snapshotGeneration: UInt64 = 0
+    private var snapshotIsRunning = false
     private let onboardingSuppressedKey = "OpenIslandOnboardingSuppressed"
     private let onboardingSeenKey = "OpenIslandOnboardingSeen"
+
+    private static let maxConsecutiveBridgeFailures = 5
+    private static let healthyBridgeUptime: TimeInterval = 15
+    private static let restartBackoffBase: TimeInterval = 0.5
+    private static let restartBackoffMax: TimeInterval = 8
 
     private init() {
         refreshDiagnostics()
@@ -109,30 +125,56 @@ final class AppBootstrapService: ObservableObject {
         requestOnboardingPresentationIfNeeded()
     }
 
+    struct BridgeRuntimeSnapshot {
+        let generation: UInt64
+        let isRunning: Bool
+    }
+
+    func bridgeRuntimeSnapshot() -> BridgeRuntimeSnapshot {
+        bridgeSnapshotLock.lock()
+        defer { bridgeSnapshotLock.unlock() }
+        return BridgeRuntimeSnapshot(generation: snapshotGeneration, isRunning: snapshotIsRunning)
+    }
+
     func stop() {
         didStart = false
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
         runtimeQueue.sync {
             desiredBridgeRunning = false
+            hasGivenUpOnBridge = false
+            consecutiveBridgeFailures = 0
+            cancelScheduledRestart()
+            cancelHealthyReset()
             if let process = bridgeProcess {
                 process.terminationHandler = nil
                 _ = stopBridgeProcess(process)
             }
             bridgeProcess = nil
+            bridgeStartedAt = nil
+            bridgeGeneration += 1
+            notifyBridgeRuntime(isRunning: false, isRestarting: false, didGiveUp: false)
         }
         isBridgeRunning = false
+        isBridgeRestarting = false
+        didGiveUpOnBridge = false
     }
 
     private func runBootstrap(forceRestart: Bool = false) {
         DispatchQueue.main.async {
             self.isBootstrapping = true
             self.lastBootstrapError = nil
+            self.didGiveUpOnBridge = false
+            self.isBridgeRestarting = false
             self.refreshDiagnostics()
         }
 
         runtimeQueue.async {
             self.desiredBridgeRunning = true
+            self.hasGivenUpOnBridge = false
+            if forceRestart {
+                self.consecutiveBridgeFailures = 0
+            }
             self.startBridgeIfPossible(forceRestart: forceRestart)
             self.finishBootstrap()
         }
@@ -177,24 +219,31 @@ final class AppBootstrapService: ObservableObject {
 
     private func startBridgeIfPossible(forceRestart: Bool = false) {
         guard desiredBridgeRunning else { return }
-        guard validateRuntimeManifest() else {
-            noteBootstrapError("Bundled runtime integrity validation failed")
-            return
+        if forceRestart {
+            hasGivenUpOnBridge = false
+            consecutiveBridgeFailures = 0
+            cancelScheduledRestart()
+            cancelHealthyReset()
         }
-        if forceRestart, bridgeProcess?.isRunning == true {
-            guard let process = bridgeProcess else { return }
+        guard !hasGivenUpOnBridge else { return }
+
+        if forceRestart, let process = bridgeProcess, process.isRunning {
             process.terminationHandler = nil
             guard stopBridgeProcess(process) else {
                 noteBootstrapError("Existing bridge did not exit; refusing to start a second instance")
                 return
             }
             bridgeProcess = nil
-            DispatchQueue.main.async {
-                self.isBridgeRunning = false
-            }
+            bridgeStartedAt = nil
+            bridgeGeneration += 1
+            notifyBridgeRuntime(isRunning: false, isRestarting: false, didGiveUp: false)
         }
 
         guard bridgeProcess == nil else { return }
+        guard validateRuntimeManifest() else {
+            noteBootstrapError("Bundled runtime integrity validation failed")
+            return
+        }
         guard let nodeInvocation = nodeInvocation() else {
             noteBootstrapError("Node.js not found")
             print("OpenIsland bootstrap: Node.js not found, bridge not started")
@@ -219,36 +268,155 @@ final class AppBootstrapService: ObservableObject {
 
         do {
             try process.run()
-            capabilityPipe.fileHandleForReading.closeFile()
-            capabilityPipe.fileHandleForWriting.write(Data(RuntimeSecurity.uiCapability.utf8))
-            capabilityPipe.fileHandleForWriting.closeFile()
+            bridgeGeneration += 1
+            let generation = bridgeGeneration
             bridgeProcess = process
-            DispatchQueue.main.async {
-                self.isBridgeRunning = true
-            }
-            print("OpenIsland bootstrap: bridge started")
-
+            bridgeStartedAt = Date()
             process.terminationHandler = { [weak self] terminatedProcess in
                 self?.runtimeQueue.async {
                     guard let self, self.bridgeProcess === terminatedProcess else { return }
-                    print("OpenIsland bootstrap: bridge exited with status \(terminatedProcess.terminationStatus)")
-                    self.bridgeProcess = nil
-                    DispatchQueue.main.async {
-                        self.isBridgeRunning = false
-                    }
-                    self.noteBootstrapError("Bridge exited with status \(terminatedProcess.terminationStatus)")
-                    self.refreshDiagnostics()
+                    self.handleUnexpectedBridgeExit(terminatedProcess, generation: generation)
                 }
             }
+            capabilityPipe.fileHandleForReading.closeFile()
+            capabilityPipe.fileHandleForWriting.write(Data(RuntimeSecurity.uiCapability.utf8))
+            capabilityPipe.fileHandleForWriting.closeFile()
+            notifyBridgeRuntime(isRunning: true, isRestarting: false, didGiveUp: false)
+            scheduleHealthyFailureReset(generation: generation)
+            print("OpenIsland bootstrap: bridge started generation=\(generation)")
         } catch {
             capabilityPipe.fileHandleForReading.closeFile()
             capabilityPipe.fileHandleForWriting.closeFile()
-            DispatchQueue.main.async {
-                self.isBridgeRunning = false
-            }
-            noteBootstrapError("Failed to start the local bridge")
-            print("OpenIsland bootstrap: failed to start bridge - \(error.localizedDescription)")
+            handleBridgeLaunchFailure(error)
         }
+    }
+
+    private func handleUnexpectedBridgeExit(_ process: Process, generation: UInt64) {
+        let status = process.terminationStatus
+        let uptime = bridgeStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        print("OpenIsland bootstrap: bridge exited generation=\(generation) status=\(status) uptime=\(Int(uptime))s")
+
+        guard bridgeGeneration == generation else { return }
+        bridgeProcess = nil
+        bridgeStartedAt = nil
+        cancelHealthyReset()
+
+        if !desiredBridgeRunning {
+            notifyBridgeRuntime(isRunning: false, isRestarting: false)
+            return
+        }
+
+        if uptime >= Self.healthyBridgeUptime {
+            consecutiveBridgeFailures = 0
+        }
+        consecutiveBridgeFailures += 1
+
+        if consecutiveBridgeFailures >= Self.maxConsecutiveBridgeFailures {
+            giveUpOnBridge(reason: "Bridge crashed \(consecutiveBridgeFailures) times in a row and will not restart automatically. Last exit status: \(status). Retry setup to start it again.")
+            return
+        }
+
+        let delay = restartDelay(for: consecutiveBridgeFailures)
+        let message = "Bridge exited with status \(status); restarting in \(formattedDelay(delay)) (attempt \(consecutiveBridgeFailures)/\(Self.maxConsecutiveBridgeFailures))"
+        print("OpenIsland bootstrap: \(message)")
+        notifyBridgeRuntime(isRunning: false, isRestarting: true, error: message)
+        scheduleBridgeRestart(delay: delay, generation: generation)
+    }
+
+    private func handleBridgeLaunchFailure(_ error: Error) {
+        consecutiveBridgeFailures += 1
+        if consecutiveBridgeFailures >= Self.maxConsecutiveBridgeFailures {
+            giveUpOnBridge(reason: "Failed to start the local bridge \(consecutiveBridgeFailures) times. Last error: \(error.localizedDescription). Retry setup to try again.")
+            print("OpenIsland bootstrap: failed to start bridge - \(error.localizedDescription)")
+            return
+        }
+
+        let delay = restartDelay(for: consecutiveBridgeFailures)
+        let message = "Failed to start the local bridge; retrying in \(formattedDelay(delay)) (attempt \(consecutiveBridgeFailures)/\(Self.maxConsecutiveBridgeFailures))"
+        print("OpenIsland bootstrap: failed to start bridge - \(error.localizedDescription)")
+        notifyBridgeRuntime(isRunning: false, isRestarting: true, error: message)
+        scheduleBridgeRestart(delay: delay, generation: bridgeGeneration)
+    }
+
+    private func giveUpOnBridge(reason: String) {
+        hasGivenUpOnBridge = true
+        cancelScheduledRestart()
+        print("OpenIsland bootstrap: \(reason)")
+        notifyBridgeRuntime(isRunning: false, isRestarting: false, didGiveUp: true, error: reason)
+    }
+
+    private func scheduleBridgeRestart(delay: TimeInterval, generation: UInt64) {
+        cancelScheduledRestart()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.desiredBridgeRunning, !self.hasGivenUpOnBridge else { return }
+            guard self.bridgeGeneration == generation else { return }
+            guard self.bridgeProcess == nil else { return }
+            print("OpenIsland bootstrap: respawning bridge")
+            self.startBridgeIfPossible()
+        }
+        restartWorkItem = workItem
+        runtimeQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleHealthyFailureReset(generation: UInt64) {
+        cancelHealthyReset()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.bridgeGeneration == generation, self.bridgeProcess?.isRunning == true else { return }
+            self.consecutiveBridgeFailures = 0
+            DispatchQueue.main.async {
+                self.lastBootstrapError = nil
+                self.refreshDiagnostics()
+            }
+        }
+        healthyResetWorkItem = workItem
+        runtimeQueue.asyncAfter(deadline: .now() + Self.healthyBridgeUptime, execute: workItem)
+    }
+
+    private func cancelScheduledRestart() {
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+    }
+
+    private func cancelHealthyReset() {
+        healthyResetWorkItem?.cancel()
+        healthyResetWorkItem = nil
+    }
+
+    private func restartDelay(for failureCount: Int) -> TimeInterval {
+        let exponent = max(0, failureCount - 1)
+        return min(Self.restartBackoffMax, Self.restartBackoffBase * pow(2.0, Double(exponent)))
+    }
+
+    private func formattedDelay(_ delay: TimeInterval) -> String {
+        if delay < 1 {
+            return "0.5s"
+        }
+        return "\(Int(delay))s"
+    }
+
+    private func notifyBridgeRuntime(isRunning: Bool, isRestarting: Bool, didGiveUp: Bool? = nil, error: String? = nil) {
+        storeBridgeSnapshot(isRunning: isRunning)
+        SocketService.shared.noteBridgeRuntime(generation: bridgeGeneration, isRunning: isRunning)
+        DispatchQueue.main.async {
+            self.isBridgeRunning = isRunning
+            self.isBridgeRestarting = isRestarting
+            if let didGiveUp {
+                self.didGiveUpOnBridge = didGiveUp
+            }
+            if let error {
+                self.lastBootstrapError = error
+            }
+            self.refreshDiagnostics()
+        }
+    }
+
+    private func storeBridgeSnapshot(isRunning: Bool) {
+        bridgeSnapshotLock.lock()
+        snapshotGeneration = bridgeGeneration
+        snapshotIsRunning = isRunning
+        bridgeSnapshotLock.unlock()
     }
 
     private func stopBridgeProcess(_ process: Process, grace: TimeInterval = 2) -> Bool {
@@ -441,13 +609,9 @@ final class AppBootstrapService: ObservableObject {
             ),
             BootstrapCheck(
                 id: "bridge",
-                title: socketReachable ? "Local bridge connected" : (bridgeRunning ? "Waiting for bridge connection" : "Start the local bridge"),
-                detail: socketReachable
-                    ? "The app is connected to its private local bridge socket."
-                    : (bridgeRunning
-                        ? "The bridge process is running, but the app has not connected yet."
-                        : bridgeFailureDetail()),
-                state: socketReachable ? .ready : (bridgeRunning ? .running : .warning),
+                title: bridgeCheckTitle(socketReachable: socketReachable, bridgeRunning: bridgeRunning),
+                detail: bridgeCheckDetail(socketReachable: socketReachable, bridgeRunning: bridgeRunning),
+                state: bridgeCheckState(socketReachable: socketReachable, bridgeRunning: bridgeRunning),
                 action: .retrySetup,
                 actionTitle: socketReachable ? "Restart" : "Retry Setup"
             )
@@ -529,6 +693,54 @@ final class AppBootstrapService: ObservableObject {
     private func currentEnvironmentContainsLocalBin() -> Bool {
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return path.contains("/.local/bin")
+    }
+
+    private func bridgeCheckTitle(socketReachable: Bool, bridgeRunning: Bool) -> String {
+        if socketReachable {
+            return "Local bridge connected"
+        }
+        if didGiveUpOnBridge {
+            return "Local bridge stopped after repeated crashes"
+        }
+        if isBridgeRestarting {
+            return "Restarting local bridge"
+        }
+        if bridgeRunning {
+            return "Waiting for bridge connection"
+        }
+        return "Start the local bridge"
+    }
+
+    private func bridgeCheckDetail(socketReachable: Bool, bridgeRunning: Bool) -> String {
+        if socketReachable {
+            return "The app is connected to its private local bridge socket."
+        }
+        if didGiveUpOnBridge {
+            return bridgeFailureDetail()
+        }
+        if isBridgeRestarting {
+            if let lastBootstrapError, !lastBootstrapError.isEmpty {
+                return lastBootstrapError
+            }
+            return "The local bridge exited and Open Island is restarting it."
+        }
+        if bridgeRunning {
+            return "The bridge process is running, but the app has not connected yet."
+        }
+        return bridgeFailureDetail()
+    }
+
+    private func bridgeCheckState(socketReachable: Bool, bridgeRunning: Bool) -> BootstrapCheckState {
+        if socketReachable {
+            return .ready
+        }
+        if didGiveUpOnBridge {
+            return .blocking
+        }
+        if isBridgeRestarting || bridgeRunning {
+            return .running
+        }
+        return .warning
     }
 
     private func bridgeFailureDetail() -> String {

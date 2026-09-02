@@ -20,6 +20,9 @@ class SocketService: ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
     private var incomingBuffer = Data()
     private var didRegisterObservers = false
+    private var isListening = false
+    private var ioGeneration: UInt64 = 0
+    private var connectedBridgeGeneration: UInt64 = 0
     private var processPollTimer: Timer?
     private var socketAgents: [String: Agent] = [:]
     private var processAgents: [String: Agent] = [:]
@@ -34,9 +37,34 @@ class SocketService: ObservableObject {
     func startListening() {
         registerObserversIfNeeded()
         print("SocketService: startListening")
+        socketQueue.async {
+            self.isListening = true
+        }
         refreshCodexAgents(activeProcesses: [])
         startProcessPolling()
         connectToSocket()
+    }
+
+    func noteBridgeRuntime(generation: UInt64, isRunning: Bool) {
+        socketQueue.async {
+            guard self.isListening else { return }
+
+            if !isRunning {
+                self.reconnectWorkItem?.cancel()
+                self.reconnectWorkItem = nil
+                if self.socketFD >= 0 {
+                    self.handleDisconnect(shouldReconnect: false)
+                }
+                return
+            }
+
+            if self.socketFD >= 0 && self.connectedBridgeGeneration != 0 && self.connectedBridgeGeneration != generation {
+                self.handleDisconnect(shouldReconnect: false)
+            }
+            if self.socketFD == -1 {
+                self.connectToSocket()
+            }
+        }
     }
 
     private func registerObserversIfNeeded() {
@@ -64,6 +92,12 @@ class SocketService: ObservableObject {
     private func connectToSocket() {
         socketQueue.async {
             guard self.socketFD == -1 else { return }
+            let snapshot = AppBootstrapService.shared.bridgeRuntimeSnapshot()
+            if !snapshot.isRunning {
+                print("SocketService: skip connect; bridge is not running")
+                return
+            }
+            let bridgeGeneration = snapshot.generation
 
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else {
@@ -103,8 +137,11 @@ class SocketService: ObservableObject {
             }
 
             self.socketFD = fd
+            self.ioGeneration += 1
+            let ioGeneration = self.ioGeneration
+            self.connectedBridgeGeneration = bridgeGeneration
             self.incomingBuffer.removeAll(keepingCapacity: true)
-            self.setupReadSource(for: fd)
+            self.setupReadSource(for: fd, generation: ioGeneration)
             self.send(
                 ClientHelloMessage(
                     type: "hello",
@@ -114,11 +151,12 @@ class SocketService: ObservableObject {
         }
     }
 
-    private func setupReadSource(for fd: Int32) {
+    private func setupReadSource(for fd: Int32, generation: UInt64) {
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: socketQueue)
 
         source.setEventHandler { [weak self] in
-            self?.readAvailableData()
+            guard let self, self.ioGeneration == generation, self.socketFD == fd else { return }
+            self.readAvailableData()
         }
 
         source.setCancelHandler {
@@ -130,12 +168,13 @@ class SocketService: ObservableObject {
     }
 
     private func readAvailableData() {
-        guard socketFD >= 0 else { return }
+        let fd = socketFD
+        guard fd >= 0 else { return }
 
         var buffer = [UInt8](repeating: 0, count: 4096)
         var bytesRead: Int
         repeat {
-            bytesRead = read(socketFD, &buffer, buffer.count)
+            bytesRead = read(fd, &buffer, buffer.count)
         } while bytesRead < 0 && errno == EINTR
 
         if bytesRead > 0 {
@@ -340,7 +379,9 @@ class SocketService: ObservableObject {
 
     private func send<T: Encodable>(_ value: T) {
         socketQueue.async {
-            guard self.socketFD >= 0 else { return }
+            let generation = self.ioGeneration
+            let fd = self.socketFD
+            guard fd >= 0 else { return }
 
             do {
                 let data = try JSONEncoder().encode(value) + Data([0x0A])
@@ -348,7 +389,7 @@ class SocketService: ObservableObject {
                     guard let baseAddress = bytes.baseAddress else { return true }
                     var offset = 0
                     while offset < bytes.count {
-                        let result = write(self.socketFD, baseAddress.advanced(by: offset), bytes.count - offset)
+                        let result = write(fd, baseAddress.advanced(by: offset), bytes.count - offset)
                         if result > 0 {
                             offset += result
                             continue
@@ -360,17 +401,21 @@ class SocketService: ObservableObject {
                     }
                     return true
                 }
-                if !didWrite { self.handleDisconnect() }
+                if !didWrite && self.ioGeneration == generation {
+                    self.handleDisconnect()
+                }
             } catch {
                 print("Socket encode error: \(error)")
             }
         }
     }
 
-    private func handleDisconnect() {
+    private func handleDisconnect(shouldReconnect: Bool = true) {
         readSource?.cancel()
         readSource = nil
         socketFD = -1
+        ioGeneration += 1
+        connectedBridgeGeneration = 0
 
         DispatchQueue.main.async {
             self.isConnected = false
@@ -382,14 +427,30 @@ class SocketService: ObservableObject {
             self.publishAgents()
         }
 
-        scheduleReconnect()
+        if shouldReconnect {
+            scheduleReconnect()
+        }
     }
 
     private func scheduleReconnect() {
         reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+
+        let snapshot = AppBootstrapService.shared.bridgeRuntimeSnapshot()
+        guard snapshot.isRunning else {
+            print("SocketService: pausing reconnect; bridge is not running")
+            return
+        }
+        let generation = snapshot.generation
 
         let workItem = DispatchWorkItem { [weak self] in
-            self?.connectToSocket()
+            guard let self else { return }
+            let current = AppBootstrapService.shared.bridgeRuntimeSnapshot()
+            guard current.isRunning, current.generation == generation else {
+                print("SocketService: dropping stale reconnect for generation \(generation)")
+                return
+            }
+            self.connectToSocket()
         }
 
         reconnectWorkItem = workItem
