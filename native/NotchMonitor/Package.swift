@@ -11,12 +11,17 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        .target(
+            name: "OpenIslandCore",
+            path: "Sources/OpenIslandCore"
+        ),
         .executableTarget(
             name: "NotchMonitor",
-            dependencies: [],
+            dependencies: ["OpenIslandCore"],
             path: "Sources",
             exclude: [
-                "AppRuntime"
+                "AppRuntime",
+                "OpenIslandCore"
             ],
             sources: ["."],
             resources: [
@@ -24,6 +29,11 @@ let package = Package(
                 .copy("AppRuntime/scripts"),
                 .copy("AppRuntime/runtime-manifest.json")
             ]
+        ),
+        .testTarget(
+            name: "OpenIslandCoreTests",
+            dependencies: ["OpenIslandCore"],
+            path: "Tests/OpenIslandCoreTests"
         )
     ]
 )

@@ -23,14 +23,19 @@ final class UsageStore: ObservableObject {
     private init() {}
 
     func startAutoRefresh() {
-        stopAutoRefresh()
-        refresh()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refresh()
+        if pollTimer == nil {
+            pollTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refresh()
+                }
             }
+            startNetworkMonitor()
         }
-        startNetworkMonitor()
+
+        let stale = lastUpdated.map { Date().timeIntervalSince($0) >= 300 } ?? true
+        if stale {
+            refresh()
+        }
     }
 
     func stopAutoRefresh() {

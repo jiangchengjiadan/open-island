@@ -45,6 +45,10 @@ jobs:
         run: npm test
         working-directory: bridge
 
+      - name: Test Swift core
+        run: swift test --filter OpenIslandCoreTests
+        working-directory: native/NotchMonitor
+
       - name: Build Swift app
         run: swift build
         working-directory: native/NotchMonitor

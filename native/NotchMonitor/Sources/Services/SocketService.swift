@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 import Darwin
+import OpenIslandCore
 
 class SocketService: ObservableObject {
     static let shared = SocketService()
@@ -525,7 +526,8 @@ class SocketService: ObservableObject {
                                 pid: pid,
                                 tty: tty == "??" ? "background" : tty,
                                 command: command,
-                                args: args
+                                args: args,
+                                cwd: nil
                             )
                         )
                     }
@@ -548,9 +550,16 @@ class SocketService: ObservableObject {
                 )
             }
 
+            let workingDirectories = self.workingDirectories(forPIDs: activeCodexProcesses.map(\.pid))
+            let processesWithCWD = activeCodexProcesses.map { snapshot -> CodexProcessSnapshot in
+                var next = snapshot
+                next.cwd = snapshot.cwd ?? workingDirectories[snapshot.pid]
+                return next
+            }
+
             DispatchQueue.main.async {
                 self.processAgents = detected
-                self.refreshCodexAgents(activeProcesses: activeCodexProcesses)
+                self.refreshCodexAgents(activeProcesses: processesWithCWD)
                 self.publishAgents()
             }
         }
@@ -773,8 +782,11 @@ class SocketService: ObservableObject {
 
     private func refreshCodexAgents(activeProcesses: [CodexProcessSnapshot]) {
         let primaryProcesses = deduplicatedCodexProcesses(activeProcesses)
+        let processRecords = primaryProcesses.map {
+            CodexProcessRecord(pid: $0.pid, tty: $0.tty, command: $0.command, args: $0.args, cwd: $0.cwd)
+        }
 
-        guard !primaryProcesses.isEmpty else {
+        guard !processRecords.isEmpty else {
             codexAgents = [:]
             return
         }
@@ -788,17 +800,8 @@ class SocketService: ObservableObject {
         else {
             print("Codex monitor: failed to read history or sessions directory")
             codexAgents = Dictionary(
-                uniqueKeysWithValues: primaryProcesses.map { process in
-                    let agent = Agent(
-                        id: "codex-process:\(process.pid)",
-                        name: "codex",
-                        type: .codex,
-                        status: .running,
-                        terminal: process.tty,
-                        tty: process.tty,
-                        currentTask: process.args,
-                        lastUpdate: Date()
-                    )
+                uniqueKeysWithValues: processRecords.map { process in
+                    let agent = self.codexAgent(fromProcess: process, session: nil, now: Date())
                     return (agent.id, agent)
                 }
             )
@@ -828,7 +831,7 @@ class SocketService: ObservableObject {
             .sorted()
             .suffix(40)
 
-        var recentSessions: [Agent] = []
+        var recentSessions: [CodexSessionRecord] = []
 
         for relativePath in sortedSessionFiles.reversed() {
             let absolutePath = "\(sessionsRoot)/\(relativePath)"
@@ -855,59 +858,112 @@ class SocketService: ObservableObject {
             let compactTask = String(task.prefix(120))
             let name = "codex — \(cwdName)"
             recentSessions.append(
-                Agent(
-                id: "codex-session:\(sessionID)",
-                name: name,
-                type: .codex,
-                status: .running,
-                terminal: sessionEvent.payload.originator,
-                cwd: sessionEvent.payload.cwd,
-                currentTask: compactTask.isEmpty ? "Session started in \(cwdName)" : compactTask,
-                lastUpdate: latestSessionTimestamp
+                CodexSessionRecord(
+                    sessionID: sessionID,
+                    cwd: sessionEvent.payload.cwd,
+                    originator: sessionEvent.payload.originator,
+                    jsonlPath: absolutePath,
+                    currentTask: compactTask.isEmpty ? "Session started in \(cwdName)" : compactTask,
+                    name: name,
+                    lastUpdate: latestSessionTimestamp,
+                    pid: sessionEvent.payload.pid
                 )
             )
         }
 
-        recentSessions.sort { $0.lastUpdate > $1.lastUpdate }
-
+        let pairing = CodexSessionPairing.pair(processes: processRecords, sessions: recentSessions)
         var detected: [String: Agent] = [:]
-        for (index, process) in primaryProcesses.enumerated() {
-            if index < recentSessions.count {
-                let sessionAgent = recentSessions[index]
-                let agent = Agent(
-                    id: "codex-process:\(process.pid)",
-                    name: sessionAgent.name,
-                    type: sessionAgent.type,
-                    status: sessionAgent.status,
-                    terminal: process.tty,
-                    terminalApp: sessionAgent.terminalApp,
-                    tty: process.tty,
-                    cwd: sessionAgent.cwd,
-                    pid: Int(process.pid),
-                    currentTask: sessionAgent.currentTask,
-                    lastUpdate: sessionAgent.lastUpdate,
-                    needsPermission: sessionAgent.needsPermission,
-                    permissionRequest: sessionAgent.permissionRequest
-                )
-                detected[agent.id] = agent
-            } else {
-                let agent = Agent(
-                    id: "codex-process:\(process.pid)",
-                    name: "codex",
-                    type: .codex,
-                    status: .running,
-                    terminal: process.tty,
-                    tty: process.tty,
-                    pid: Int(process.pid),
-                    currentTask: process.args,
-                    lastUpdate: now
-                )
-                detected[agent.id] = agent
-            }
+        for pair in pairing.paired {
+            let agent = codexAgent(fromProcess: pair.process, session: pair.session, now: now)
+            detected[agent.id] = agent
+        }
+        for process in pairing.unpairedProcesses {
+            let agent = codexAgent(fromProcess: process, session: nil, now: now)
+            detected[agent.id] = agent
         }
 
         codexAgents = detected
         print("Codex monitor: built \(detected.count) visible codex agent(s) from \(primaryProcesses.count) primary codex process(es)")
+    }
+
+    private func codexAgent(fromProcess process: CodexProcessRecord?, session: CodexSessionRecord?, now: Date) -> Agent {
+        if let process, let session {
+            return Agent(
+                id: "codex-process:\(process.pid)",
+                name: session.name,
+                type: .codex,
+                status: .running,
+                terminal: process.tty,
+                tty: process.tty,
+                cwd: session.cwd,
+                pid: Int(process.pid),
+                currentTask: session.currentTask,
+                lastUpdate: session.lastUpdate
+            )
+        }
+        if let process {
+            return Agent(
+                id: "codex-process:\(process.pid)",
+                name: "codex",
+                type: .codex,
+                status: .running,
+                terminal: process.tty,
+                tty: process.tty,
+                cwd: process.cwd,
+                pid: Int(process.pid),
+                currentTask: process.args,
+                lastUpdate: now
+            )
+        }
+        let session = session!
+        return Agent(
+            id: "codex-session:\(session.sessionID)",
+            name: session.name,
+            type: .codex,
+            status: .running,
+            terminal: session.originator,
+            cwd: session.cwd,
+            currentTask: session.currentTask,
+            lastUpdate: session.lastUpdate
+        )
+    }
+
+    private func workingDirectories(forPIDs pids: [String]) -> [String: String] {
+        let uniquePIDs = Array(Set(pids.filter { !$0.isEmpty }))
+        guard !uniquePIDs.isEmpty else { return [:] }
+
+        let lsofPath = ["/usr/sbin/lsof", "/usr/bin/lsof"].first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+        guard let lsofPath else { return [:] }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: lsofPath)
+        process.arguments = ["-a", "-d", "cwd", "-Fn", "-p", uniquePIDs.joined(separator: ",")]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return [:]
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard let output = String(data: data, encoding: .utf8) else { return [:] }
+
+        var directories: [String: String] = [:]
+        var currentPID: String?
+        for line in output.split(separator: "\n") {
+            if line.hasPrefix("p") {
+                currentPID = String(line.dropFirst())
+            } else if line.hasPrefix("n"), let currentPID {
+                directories[currentPID] = String(line.dropFirst())
+            }
+        }
+        return directories
     }
 
     private func deduplicatedCodexProcesses(_ processes: [CodexProcessSnapshot]) -> [CodexProcessSnapshot] {
@@ -1030,6 +1086,7 @@ private struct CodexProcessSnapshot {
     let tty: String
     let command: String
     let args: String
+    var cwd: String?
 }
 
 private struct PromptCacheEntry {
@@ -1074,12 +1131,14 @@ private struct CodexSessionPayload: Decodable {
     let cwd: String
     let originator: String
     let timestamp: Date?
+    let pid: String?
 
     private enum CodingKeys: String, CodingKey {
         case id
         case cwd
         case originator
         case timestamp
+        case pid
     }
 
     init(from decoder: Decoder) throws {
@@ -1091,6 +1150,13 @@ private struct CodexSessionPayload: Decodable {
             timestamp = ISO8601DateFormatter().date(from: rawTimestamp)
         } else {
             timestamp = nil
+        }
+        if let rawPID = try? container.decode(Int.self, forKey: .pid) {
+            pid = String(rawPID)
+        } else if let rawPID = try? container.decode(String.self, forKey: .pid) {
+            pid = rawPID
+        } else {
+            pid = nil
         }
     }
 }

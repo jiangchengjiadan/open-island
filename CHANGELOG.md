@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- No unreleased changes yet.
+- Pair Codex processes to sessions by stable keys instead of array index.
+- Limit onboarding nags to tools that are actually configured or installed.
+- Treat Accessibility as recommended instead of a required setup blocker.
+- Fetch usage from the network only while the Usage tab is visible.
+- Restart the local bridge after unexpected crashes, with backoff and a retry cap (PR 7).
+- Make open-island start and stop a daily-driver workflow, including leftover bridge cleanup (PR 8 and 9).
+- Use the public npmjs registry for CI and local installs.
+- Align package-dmg.sh default version with the current 0.2.0 product version.
+- Improve session routing so same-name sessions stay distinct across tty, pid, and cwd.
+- Keep hook installation transactional and verify bundled runtime files with a manifest.
 
 ## 0.2.0
 
