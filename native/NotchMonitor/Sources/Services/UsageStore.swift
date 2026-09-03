@@ -25,7 +25,7 @@ final class UsageStore: ObservableObject {
     func startAutoRefresh() {
         if pollTimer == nil {
             pollTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     self?.refresh()
                 }
             }
